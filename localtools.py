@@ -191,6 +191,9 @@ def render_image(data: bytes, crop: Any = None) -> bytes:
     w, h = img.size
     img = img.crop((int(box[0] * w), int(box[1] * h), int(box[2] * w),
                     int(box[3] * h)))
+    if 0 < max(img.size) < 1400:  # zoom small crops so fine text is legible
+      k = min(4.0, 1600 / max(img.size))
+      img = img.resize((max(1, int(img.size[0] * k)), max(1, int(img.size[1] * k))), Image.LANCZOS)
   return png(img)
 
 
@@ -435,10 +438,11 @@ def _ifc_problems(data: bytes) -> list[str]:
   try:
     if not f.by_type("IfcProject"):
       out.append("no IfcProject")
-    noplace = [f"{e.is_a()} {e.Name!r}" for e in f.by_type("IfcProduct")
-               if getattr(e, "ObjectPlacement", None) is None]
+    noplace = [f"{e.is_a()} {e.Name!r}" for e in f.by_type("IfcElement")
+               if getattr(e, "Representation", None) is not None
+               and getattr(e, "ObjectPlacement", None) is None]
     if noplace:
-      out.append(f"{len(noplace)} products have no ObjectPlacement (readers crash or mislocate them): "
+      out.append(f"{len(noplace)} elements have geometry but no ObjectPlacement: "
                  + ", ".join(noplace[:8]))
     if f.by_type("IfcProduct") and not f.by_type("IfcRelContainedInSpatialStructure") \
         and not f.by_type("IfcRelAggregates"):
@@ -505,6 +509,261 @@ def validate(path: str, data: bytes) -> list[str]:
   return []
 
 
+# ---------------------------------------------------------------- facts
+
+
+def _ifc_open(data: bytes) -> Any:
+  import ifcopenshell  # pylint: disable=import-outside-toplevel
+  return ifcopenshell.file.from_string(data.decode("utf-8", "replace"))
+
+
+def _ifc_signature(f: Any) -> dict[str, Any]:
+  """Classes, property sets (with value types) and typing, for diffs and facts."""
+  classes: dict[str, int] = {}
+  for e in f:
+    classes[e.is_a()] = classes.get(e.is_a(), 0) + 1
+  props: dict[str, str] = {}
+  for ps in f.by_type("IfcPropertySet"):
+    for pr in ps.HasProperties or []:
+      val = getattr(pr, "NominalValue", None)
+      kind = val.is_a() if hasattr(val, "is_a") else type(val).__name__
+      props.setdefault(f"{ps.Name}.{pr.Name}", kind)
+  typing: dict[str, str] = {}
+  for e in f.by_type("IfcProduct"):
+    key = e.is_a()
+    pre = getattr(e, "PredefinedType", None)
+    typing.setdefault(key, f"PredefinedType={pre} ObjectType={getattr(e, 'ObjectType', None)!r}")
+  return {"classes": classes, "props": props, "typing": typing}
+
+
+def ifc_facts(data: bytes, max_products: int = 4000) -> str:
+  """What a consumer of the model would measure: units, extents, structure, properties."""
+  f = _ifc_open(data)
+  out = [f"schema {f.schema}"]
+  try:
+    import ifcopenshell.util.unit as uu  # pylint: disable=import-outside-toplevel
+    scale = uu.calculate_unit_scale(f)
+    proj = f.by_type("IfcProject")
+    assigned = bool(proj and proj[0].UnitsInContext)
+    out.append(f"length unit: 1 model unit = {scale:g} m"
+               + ("" if assigned else "  (WARNING: no IfcUnitAssignment attached to IfcProject.UnitsInContext,"
+                  " so readers assume metres)"))
+  except Exception as exc:  # pylint: disable=broad-except
+    scale = 1.0
+    out.append(f"length unit: could not be determined ({str(exc)[:120]})")
+  for kind in ("IfcSite", "IfcBuilding", "IfcBuildingStorey", "IfcSpace"):
+    items = f.by_type(kind)
+    if items:
+      desc = ", ".join(f"{e.Name!r}" + (f"@elev {getattr(e, 'Elevation', None)}" if kind == "IfcBuildingStorey" else "")
+                       for e in items[:12])
+      out.append(f"{kind} x{len(items)}: {desc}")
+  sig = _ifc_signature(f)
+  prods = [e for e in f.by_type("IfcProduct") if getattr(e, "Representation", None) is not None]
+  by_cls: dict[str, int] = {}
+  for e in f.by_type("IfcProduct"):
+    by_cls[e.is_a()] = by_cls.get(e.is_a(), 0) + 1
+  out.append("products: " + ", ".join(f"{k}={v}" for k, v in sorted(by_cls.items(), key=lambda kv: -kv[1])[:40]))
+  out.append("typing (first of each class): " + "; ".join(f"{k}: {v}" for k, v in list(sig["typing"].items())[:30]))
+  if sig["props"]:
+    out.append("property sets (Pset.Property: value type): "
+               + ", ".join(f"{k}: {v}" for k, v in list(sig["props"].items())[:80]))
+    raw = [k for k, v in sig["props"].items() if not v.startswith("Ifc")]
+    if raw:
+      out.append(f"WARNING: {len(raw)} property values are untyped (not wrapped as IfcLabel/IfcReal/...),"
+                 f" which crashes readers that call .wrappedValue: {', '.join(raw[:8])}")
+  # extents by tessellation
+  try:
+    import time  # pylint: disable=import-outside-toplevel
+    import ifcopenshell.geom  # pylint: disable=import-outside-toplevel
+    settings = ifcopenshell.geom.settings()
+    settings.set("use-world-coords", True)
+    lo, hi, per_cls, failed, t0 = [1e30] * 3, [-1e30] * 3, {}, 0, time.time()
+    boxes = []
+    for e in prods[:max_products]:
+      if time.time() - t0 > 60:
+        out.append("[extent scan stopped after 60 s]")
+        break
+      try:
+        shape = ifcopenshell.geom.create_shape(settings, e)
+        v = shape.geometry.verts
+        xs, ys, zs = v[0::3], v[1::3], v[2::3]
+        b = (min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
+      except Exception:  # pylint: disable=broad-except
+        failed += 1
+        continue
+      boxes.append((e, b))
+      for i in range(3):
+        lo[i], hi[i] = min(lo[i], b[i]), max(hi[i], b[i + 3])
+      c = per_cls.setdefault(e.is_a(), [1e30] * 3 + [-1e30] * 3)
+      for i in range(3):
+        c[i], c[i + 3] = min(c[i], b[i]), max(c[i + 3], b[i + 3])
+    if boxes:
+      out.append("overall extent of geometry in METRES (as a viewer or clash checker sees it): "
+                 f"x {lo[0]:.3f}..{hi[0]:.3f}, y {lo[1]:.3f}..{hi[1]:.3f}, z {lo[2]:.3f}..{hi[2]:.3f}"
+                 f"  => size {hi[0]-lo[0]:.2f} x {hi[1]-lo[1]:.2f} x {hi[2]-lo[2]:.2f} m")
+      for k, c in list(per_cls.items())[:25]:
+        out.append(f"  {k}: x {c[0]:.2f}..{c[3]:.2f}, y {c[1]:.2f}..{c[4]:.2f}, z {c[2]:.2f}..{c[5]:.2f} m")
+      # axis-aligned box overlaps between different elements (coarse clash indication)
+      if len(boxes) <= 1500:
+        tol, hits, n_hits = 0.002, [], 0
+        for i in range(len(boxes)):
+          a = boxes[i][1]
+          for j in range(i + 1, len(boxes)):
+            b = boxes[j][1]
+            if (min(a[3], b[3]) - max(a[0], b[0]) > tol and min(a[4], b[4]) - max(a[1], b[1]) > tol
+                and min(a[5], b[5]) - max(a[2], b[2]) > tol):
+              n_hits += 1
+              if len(hits) < 8:
+                hits.append(f"{boxes[i][0].is_a()} {boxes[i][0].Name!r} x {boxes[j][0].is_a()} {boxes[j][0].Name!r}")
+        out.append(f"bounding boxes of different elements overlapping by > 2 mm: {n_hits} pairs"
+                   + (" (e.g. " + "; ".join(hits) + ")" if hits else "")
+                   + " [boxes are coarse: an overlap is a possible clash, not a proven one]")
+    if failed:
+      out.append(f"WARNING: geometry of {failed} products could not be built (a viewer would drop them)")
+  except Exception as exc:  # pylint: disable=broad-except
+    out.append(f"[extents not computed: {type(exc).__name__}: {str(exc)[:160]}]")
+  return "\n".join(out)
+
+
+def facts(path: str, data: bytes) -> str:
+  """A consumer-side measurement of a structured file ('' when there is nothing to add)."""
+  try:
+    if ext(path) == ".ifc":
+      return ifc_facts(data)
+  except Exception as exc:  # pylint: disable=broad-except
+    return f"[facts failed: {type(exc).__name__}: {str(exc)[:200]}]"
+  return ""
+
+
+def _json_shape(v: Any, depth: int = 0) -> Any:
+  if isinstance(v, dict):
+    return {k: _json_shape(x, depth + 1) for k, x in list(v.items())[:60]} if depth < 4 else "{...}"
+  if isinstance(v, list):
+    return [_json_shape(v[0], depth + 1)] if v and depth < 4 else "[]"
+  return type(v).__name__
+
+
+def _shape_diff(ex: Any, ours: Any, where: str, out: list[str]) -> None:
+  if len(out) > 25:
+    return
+  if isinstance(ex, dict) and isinstance(ours, dict):
+    for k in ex:
+      if k not in ours:
+        out.append(f"{where}.{k}: in the example, missing in yours")
+      else:
+        _shape_diff(ex[k], ours[k], f"{where}.{k}", out)
+    for k in ours:
+      if k not in ex:
+        out.append(f"{where}.{k}: in yours, not in the example")
+  elif isinstance(ex, list) and isinstance(ours, list):
+    if ex and ours:
+      _shape_diff(ex[0], ours[0], where + "[]", out)
+  elif type(ex) is not type(ours) or (isinstance(ex, str) and ex != ours and {ex, ours} != {"int", "float"}):
+    out.append(f"{where}: example has {ex if isinstance(ex, str) else type(ex).__name__},"
+               f" yours has {ours if isinstance(ours, str) else type(ours).__name__}")
+
+
+def exemplar_diff(path: str, data: bytes, ex_path: str, ex_data: bytes) -> list[str]:
+  """Structural differences between a deliverable and a same-format example from the task."""
+  e = ext(path)
+  out: list[str] = []
+  try:
+    if e == ".ifc":
+      a, b = _ifc_signature(_ifc_open(ex_data)), _ifc_signature(_ifc_open(data))
+      miss = [c for c in a["classes"] if c not in b["classes"]]
+      if miss:
+        out.append("entity classes the example uses and yours does not: " + ", ".join(miss[:30]))
+      for k, v in a["props"].items():
+        if k in b["props"] and b["props"][k] != v:
+          out.append(f"property {k}: example value type {v}, yours {b['props'][k]}")
+      pm = [k for k in a["props"] if k not in b["props"]]
+      if pm:
+        out.append("properties in the example and not in yours: " + ", ".join(pm[:30]))
+      for k, v in a["typing"].items():
+        if k in b["typing"] and b["typing"][k].split(" ")[0] != v.split(" ")[0]:
+          out.append(f"{k}: example {v}; yours {b['typing'][k]}")
+      # argument counts per entity type, straight from the text (catches extra/missing arguments)
+      def argc(raw: bytes) -> dict[str, int]:
+        import re as _re  # pylint: disable=import-outside-toplevel
+        res: dict[str, int] = {}
+        for m in _re.finditer(rb"^#\d+\s*=\s*(IFC\w+)\((.*)\);\s*$", raw, _re.M):
+          name, body = m.group(1).decode(), m.group(2).decode("utf-8", "replace")
+          depth, n, in_str = 0, 1, False
+          for ch in body:
+            if ch == "'":
+              in_str = not in_str
+            elif not in_str:
+              if ch == "(":
+                depth += 1
+              elif ch == ")":
+                depth -= 1
+              elif ch == "," and depth == 0:
+                n += 1
+          res.setdefault(name, n)
+        return res
+      ca, cb = argc(ex_data), argc(data)
+      for k, n in ca.items():
+        if k in cb and cb[k] != n:
+          out.append(f"{k}: the example writes {n} arguments, yours writes {cb[k]}")
+    elif e == ".json":
+      _shape_diff(_json_shape(json.loads(ex_data.decode("utf-8"))),
+                  _json_shape(json.loads(data.decode("utf-8"))), "$", out)
+    elif e == ".csv":
+      ha = ex_data.decode("utf-8-sig", "replace").splitlines()[:1]
+      hb = data.decode("utf-8-sig", "replace").splitlines()[:1]
+      if ha and hb and ha != hb:
+        out.append(f"header row differs: example {ha[0][:300]!r}; yours {hb[0][:300]!r}")
+    elif e in (".xlsx", ".xlsm"):
+      import openpyxl  # pylint: disable=import-outside-toplevel
+      wa = openpyxl.load_workbook(io.BytesIO(ex_data), read_only=True)
+      wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True)
+      if wa.sheetnames != wb.sheetnames:
+        out.append(f"sheet names differ: example {wa.sheetnames}; yours {wb.sheetnames}")
+  except Exception as exc:  # pylint: disable=broad-except
+    out.append(f"[could not compare with {ex_path}: {type(exc).__name__}: {str(exc)[:160]}]")
+  return out[:30]
+
+
+def preview(path: str, data: bytes, limit: int = 220) -> str:
+  """The first words of a document, for triage."""
+  e = ext(path)
+  try:
+    if e == ".pdf":
+      import pdfplumber  # pylint: disable=import-outside-toplevel
+      with pdfplumber.open(io.BytesIO(data)) as pdf:
+        text = (pdf.pages[0].extract_text() or "") if pdf.pages else ""
+        head = f"[{len(pdf.pages)}p] "
+        if not text.strip():
+          return head + "(no text layer: a scan or drawing; use view)"
+    elif e in (".xlsx", ".xlsm"):
+      import openpyxl  # pylint: disable=import-outside-toplevel
+      wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True)
+      head = f"[sheets: {', '.join(wb.sheetnames[:8])}] "
+      ws = wb.worksheets[0]
+      cells = []
+      for row in ws.iter_rows(max_row=6, values_only=True):
+        cells += [str(c) for c in row if c is not None]
+      text = " | ".join(cells)
+    elif e == ".docx":
+      head, text = "", docx_text(data)
+    elif e == ".pptx":
+      head, text = "", pptx_text(data)
+    elif e in IMAGE_EXT:
+      from PIL import Image  # pylint: disable=import-outside-toplevel
+      img = Image.open(io.BytesIO(data))
+      return f"(image {img.size[0]}x{img.size[1]}; use view)"
+    elif e in (".dxf", ".ifc", ".zip", ".xls"):
+      head, text = "", inspect(path, data)
+    else:
+      if b"\0" in data[:4096]:
+        return "(binary)"
+      head, text = "", data[:2000].decode("utf-8", "replace")
+    text = " ".join(text.split())
+    return head + (text[:limit] + ("…" if len(text) > limit else ""))
+  except Exception as exc:  # pylint: disable=broad-except
+    return f"(preview failed: {type(exc).__name__})"
+
+
 # ---------------------------------------------------------------- dispatch
 
 
@@ -531,7 +790,10 @@ def inspect(path: str, data: bytes, pages: Any = None, sheet: Any = None,
   if e == ".dxf":
     return clip(grep(dxf_text(data), query))
   if e in (".ifc", ".ifczip"):
-    return clip(grep(ifc_text(data), query))
+    text = ifc_text(data)
+    if e == ".ifc" and not query:
+      text = "[[measured facts]]\n" + facts(path, data) + "\n[[entities]]\n" + text
+    return clip(grep(text, query))
   if e == ".zip":
     return clip(zip_text(data))
   if e in IMAGE_EXT:

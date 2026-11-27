@@ -11,9 +11,16 @@ Builds on the reference tool loop in serve.py (Apache-2.0, Google LLC) and adds:
    the model as an image, for drawing callouts that have no text layer.
 3. A deliverable gate: required output paths are parsed from the instruction
    and checked before the agent may finish.
-4. An independent review: a fresh-context reviewer reads the instruction and
-   the delivered files and lists concrete defects; the agent then fixes them.
-   This repeats while time and the review budget allow.
+4. A format gate: delivered files are opened with strict readers, delivered
+   generator scripts are run as the grader would run them, and structured
+   outputs are measured (units, extents, types) and compared with any example
+   file the task ships.
+5. A coverage ledger: input files no tool call touched are listed back to the
+   agent, with a preview, before it may finish.
+6. An independent check: a fresh-context agent with read-only tools re-derives
+   the key results from the inputs, runs the prescribed validations and lists
+   defects with evidence; the main agent then fixes them. This repeats while
+   time and the review budget allow.
 """
 
 from __future__ import annotations
@@ -29,7 +36,7 @@ from typing import Any
 
 import openai
 import serve
-from serve import Agent, CutOff, OutOfTime, StreamCut, parse_arguments, tool, visible
+from serve import Agent, CutOff, OutOfTime, parse_arguments, tool, visible
 import taskbridge
 import localtools
 
@@ -39,6 +46,12 @@ REVIEW_MIN_LEFT_MIN = float(os.environ.get("REVIEW_MIN_LEFT_MIN", "20"))
 KEEP_IMAGES = int(os.environ.get("KEEP_IMAGES", "6"))
 IMAGE_TOKENS = 1600  # rough prompt cost of one image
 REVIEW_CHARS = int(os.environ.get("REVIEW_CHARS", "120000"))
+AUDIT_STEPS = int(os.environ.get("AUDIT_STEPS", "45"))  # tool calls one audit may make
+AUDIT_SHARE = float(os.environ.get("AUDIT_SHARE", "0.3"))  # of the time left, per audit
+PREVIEW_FILES = int(os.environ.get("PREVIEW_FILES", "90"))
+DOC_EXT = (".pdf", ".docx", ".pptx", ".xlsx", ".xlsm", ".xls", ".dxf", ".ifc", ".zip")
+TEXT_EXT = (".txt", ".md", ".csv", ".json", ".xml", ".yaml", ".yml", ".eml", ".log", ".ini", ".toml", ".py", ".html",
+            ".htm", ".tsv", ".inp", ".dat", ".cfg", ".tex", ".rst")
 SURVEY_FILES = 400
 
 EXTRA_SYSTEM = """
@@ -69,6 +82,17 @@ coordinates in the project's units and at the real scale of the inputs). Re-open
 check its contents before you finish; a file that fails to open scores zero. Run every validation the task itself \
 prescribes, with exactly the settings it names; if the deliverable is a script, run it end to end the way the task \
 says it will be run and validate what it writes.
+- Keep scratch work (helper scripts, notes, test outputs) under /tmp/work, not in the project or output folders.
+- Keep a running notes file /tmp/work/NOTES.md: values read from each drawing or document (with sheet/page), unit \
+conventions, decisions, validation commands and their latest result. Update it as you go and re-read it after your \
+context is compacted, instead of re-deriving or re-reading everything.
+- A self-check only counts if it measures the finished file the way its consumer will (re-open it; measure real \
+extents and units; run the prescribed validator), not the numbers you intended to write. Never report a check as \
+passed when its command errored or printed a failure: fix it or say plainly that it fails.
+- Before finishing, skim every input file you have not opened: decisive facts (a calendar, an exhibit, a later \
+letter, a checklist) are often in files whose names look irrelevant.
+- When evidence a governing document requires does not exist in the project, say so explicitly instead of \
+substituting something else; say who must decide what, and by which real date.
 - Never stop early: you have hours. Use the time to verify, cross-check against the inputs, and polish.
 
 Harness tools (they run outside the container, on a copy of the file):
@@ -107,35 +131,57 @@ HARNESS_TOOLS = [
     ),
 ]
 
-REVIEW_SYSTEM = """You are a senior licensed professional engineer doing an independent QA review of a junior \
-engineer's deliverables before they are issued. You are given the task exactly as the client wrote it, the junior's \
-summary, and the contents of the files they delivered. You cannot see the input files, so judge against the task \
-text and internal consistency.
+AUDIT_SYSTEM = """You are a senior licensed professional engineer performing the independent check of a colleague's \
+deliverables before they are issued. You work in the same Linux container, with read-only intent: tools bash (starts in \
+{workdir}), read_file, inspect and view. Do NOT modify or delete any project input or deliverable; write scratch \
+files only under /tmp/audit. You have about {minutes} minutes and {steps} tool calls.
 
-List only concrete, fixable defects that would cost credit with a strict grader, most important first:
-- a required file, section, table, field, or answer that is missing, misplaced, misnamed, or in the wrong format;
-- a requirement in the task that is not explicitly addressed;
-- numbers that are inconsistent, implausible, have wrong or missing units, or conflict between files;
-- a decision or conclusion that is hedged, missing, or not supported by a stated check;
-- placeholders, TODOs, unreadable or empty files;
-- for design deliverables: a hard constraint (code limit, safety, feasibility, clearance, capacity) that the files do \
-not show as checked and met, or a requirements list missing the source clause and value.
-The file contents are shown as a plain-text extraction: lines in double square brackets ([[FILE ...]], [[page 2 \
-...]], [[table 1 ...]], [[sheet ...]]), [style] prefixes, and " | " cell separators are annotations added by the \
-extraction tool, NOT text in the files; never report them, or apparent duplication caused by them, as defects.
-Be specific (file, location, what is wrong, what it should be). Do not ask for cosmetic changes. If the deliverables \
-fully meet the task, answer exactly NO_ISSUES."""
+You are given the task as the client wrote it, the colleague's summary, the harness's measurements of the delivered \
+files, and the list of input files the colleague never opened. Check the work against the INPUT FILES and the task, \
+not against the colleague's own claims:
+1. Open each deliverable the way its consumer will (the stated reader, validator or run command, with exactly the \
+settings the task names) and measure it: does it open, are units/scale/extents/counts physically right, does every \
+prescribed check pass? If the task prescribes a validation, run it yourself.
+2. Re-derive the load-bearing numbers, verdicts and dates independently from the governing input documents (open \
+them; decide which revision governs). Report any number, unit, sign, direction (conservative vs non-conservative), \
+date or conclusion that the inputs contradict.
+3. Skim the unopened input files; report any that change the answer (quote the passage).
+4. Walk the task text requirement by requirement; report anything not explicitly delivered, misnamed, misplaced, \
+or hedged where a decision is required.
+5. For designs: test every hard constraint on the finished file with your own script; a constraint failure matters \
+more than any objective.
+
+Then answer without calling a tool. List only concrete defects that would cost credit with a strict grader, most \
+important first; for each give the file and location, the evidence (a quoted passage, or the command you ran and \
+its output), and the exact fix. Do not report cosmetic points, and do not report anything you could not verify. In \
+tool output, lines in [[double brackets]], [style] prefixes and " | " separators are extraction annotations, not \
+file text. If you verified the work and found no defects, answer exactly NO_ISSUES."""
+
+REL_RE = re.compile(r"`((?:\.?/)?[\w@+-][\w./@+-]*\.[A-Za-z0-9]{1,5})`")
+serve.SUMMARY_PROMPT += (
+    " Include: every value you read from a drawing or document with its sheet/page; unit and sign conventions;"
+    " which document revisions govern; the exact validation commands and their latest results; input files not yet"
+    " opened; and the path of your notes file.")
 
 PATH_RE = re.compile(r"(?<![\w.])(/(?:app|filesystem|workspace|output|data|home|mnt|tmp)/[\w./@+-]*[\w/])")
 
 
-def wanted_paths(instruction: str) -> list[str]:
-  """Absolute paths the instruction names (likely deliverables or inputs)."""
+def wanted_paths(instruction: str, workdir: str = "") -> list[str]:
+  """Paths the instruction names (likely deliverables or inputs); relative ones resolved to workdir."""
   seen: list[str] = []
   for m in PATH_RE.finditer(instruction):
     p = m.group(1).rstrip(".,;:)")
     if p not in seen:
       seen.append(p)
+  if workdir:
+    for m in REL_RE.finditer(instruction):
+      p = m.group(1)
+      if p.startswith("/") or "/" not in p and not re.search(
+          r"(save|write|create|produce|deliver|submit|output)[^.\n]{0,80}`" + re.escape(p), instruction, re.I):
+        continue
+      p = posixpath.normpath(posixpath.join(workdir, p))
+      if p not in seen:
+        seen.append(p)
   return seen[:60]
 
 
@@ -151,6 +197,10 @@ class EngineerAgent(Agent):
     self.gate_checks = 0
     self.format_checks = 0
     self.cache: dict[str, bytes] = {}
+    self.inputs: list[tuple[int, str]] = []  # (bytes, path) seen by the survey
+    self.opened: set[str] = set()
+    self.coverage_checks = 0
+    self.read_only = False
 
   # ------------------------------------------------------------ setup
 
@@ -189,18 +239,81 @@ class EngineerAgent(Agent):
       except ValueError:
         continue
       lines.append(f"{kb:9.1f} KB  {path}")
-    named = wanted_paths(self.session.instruction)
+      self.inputs.append((int(size), path))
+    named = wanted_paths(self.session.instruction, self.session.workdir or '')
     named_note = ""
     if named:
       named_note = "\nPaths named in the task: " + ", ".join(named)
+    try:
+      previews = await asyncio.wait_for(self.previews(), 240)
+    except Exception as exc:  # pylint: disable=broad-except
+      await self.session.log(f"survey: previews failed: {type(exc).__name__}: {str(exc)[:200]}")
+      previews = {}
+    self.preview_map = previews
+    if previews:
+      lines = [ln + ("   :: " + previews[ln.split(" KB  ", 1)[1]] if ln.split(" KB  ", 1)[1] in previews else "")
+               for ln in lines]
     return (
-        f"Project files ({len(lines)} shown):\n" + "\n".join(lines)
+        f"Project files ({len(lines)} shown; ':: ' is the first text of the file, for triage only):\n"
+        + "\n".join(lines)
         + f"\n\nTask container tooling: {tooling.strip()}"
         + "\n(Office/PDF libraries missing in the container? Use inspect/view to read files, and write"
           " deliverables with whatever is available, e.g. python-docx or openpyxl if present, otherwise build"
           " the Office XML zip with python's zipfile.)"
         + named_note
     )
+
+  async def previews(self) -> dict[str, str]:
+    """First text of each input document (path -> preview), bounded in count, size and time."""
+    import time  # pylint: disable=import-outside-toplevel
+    out: dict[str, str] = {}
+    texts = [p for sz, p in self.inputs if localtools.ext(p) in TEXT_EXT][:PREVIEW_FILES]
+    if texts:
+      cmd = "; ".join(
+          f"printf '\\n@@%s@@ ' {i}; head -c 400 {shlex.quote(p)} | tr '\\n\\r\\t' '   ' | cut -c1-230"
+          for i, p in enumerate(texts))
+      res = await self.session.exec(cmd, 60)
+      for m in re.finditer(r"@@(\d+)@@ ([^\n]*)", res.get("output") or ""):
+        text = " ".join(m.group(2).split())
+        if text:
+          out[texts[int(m.group(1))]] = text[:220]
+    t0, budget = time.time(), 250_000_000
+    docs = [(sz, p) for sz, p in self.inputs
+            if localtools.ext(p) in DOC_EXT or localtools.ext(p) in localtools.IMAGE_EXT]
+    for sz, p in docs[:PREVIEW_FILES]:
+      if time.time() - t0 > 180 or sz > 30_000_000 or sz > budget:
+        continue
+      budget -= sz
+      try:
+        data = await self.fetch(p)
+        out[p] = await asyncio.wait_for(asyncio.to_thread(localtools.preview, p, data), 30)
+      except Exception:  # pylint: disable=broad-except
+        continue
+    return out
+
+  def unopened(self) -> list[tuple[int, str]]:
+    """Input files no tool call has touched."""
+    return [(sz, p) for sz, p in self.inputs if p not in self.opened and sz > 0]
+
+  def note_opened(self, name: str, args: dict[str, Any]) -> None:
+    if name in ("read_file", "inspect", "view"):
+      self.opened.add(self.path(str(args.get("path", ""))))
+    elif name == "bash":
+      cmd = str(args.get("command", ""))
+      for _, p in self.inputs:
+        if p in self.opened:
+          continue
+        base = posixpath.basename(p)
+        if p in cmd or (len(base) >= 6 and base in cmd):
+          self.opened.add(p)
+
+  async def read_file(self, path: str) -> str:
+    out = await super().read_file(path)
+    e = localtools.ext(path)
+    if " is a binary file (" in out[:400] and (e in DOC_EXT or e in localtools.IMAGE_EXT):
+      return (f"{path} is a binary {e} file; showing the inspect tool's extraction instead"
+              " (use inspect for pages/sheets/queries, view to look at it):\n" + await self.tool_inspect(path))
+    return out
 
   # ------------------------------------------------------------ files
 
@@ -241,6 +354,10 @@ class EngineerAgent(Agent):
   # ------------------------------------------------------------ tools
 
   async def run_tool(self, name: str, args: dict[str, Any]) -> str:
+    if self.read_only and name in ("write_file", "edit_file"):
+      return "error: the checker must not change files; report the defect and its fix instead"
+    if isinstance(args, dict):
+      self.note_opened(name, args)
     if name in ("write_file", "edit_file", "bash"):
       # a write may change any cached file
       self.cache.clear()
@@ -321,7 +438,7 @@ class EngineerAgent(Agent):
 
   async def missing_outputs(self) -> list[str]:
     """Paths the task names that look like outputs and do not exist."""
-    named = wanted_paths(self.session.instruction)
+    named = wanted_paths(self.session.instruction, self.session.workdir or '')
     if not named:
       return []
     quoted = " ".join(shlex.quote(p) for p in named)
@@ -353,7 +470,7 @@ class EngineerAgent(Agent):
   async def script_outputs(self, files: list[tuple[int, str]]) -> tuple[list[str], list[tuple[int, str]]]:
     """Runs delivered generator scripts the way a grader would; returns (problems, produced files)."""
     instr = self.session.instruction
-    named = wanted_paths(instr)
+    named = wanted_paths(instr, self.session.workdir or '')
     scripts = [p for _, p in files if p.endswith(".py") and (
         any(p == n or p.endswith("/" + n.lstrip("./")) for n in named) or "/output" in p or "/submission" in p)]
     if not scripts or "sys.argv" not in instr and "argv" not in instr:
@@ -380,11 +497,24 @@ class EngineerAgent(Agent):
       produced += [(int(a), b) for a, b in rows if a.isdigit()]
     return probs, produced
 
+  def exemplar_for(self, path: str) -> str | None:
+    """A same-format example among the task's input files, if any."""
+    e = localtools.ext(path)
+    same = [p for sz, p in self.inputs if localtools.ext(p) == e and p != path and sz < 20_000_000]
+    named = [p for p in same if re.search(r"example|sample|template|reference|expected", p, re.I)]
+    if named:
+      return named[0]
+    return same[0] if len(same) == 1 else None
+
   async def invalid_outputs(self) -> list[str]:
-    """Format problems in the delivered files that a strict reader or grader would hit."""
+    """Format problems in the delivered files that a strict reader or grader would hit.
+
+    Also fills self.measured: harness-side measurements of the structured deliverables.
+    """
     files = await self.new_files()
-    files = [(s, p) for s, p in files if not p.startswith("/tmp/_harness_check")]
+    files = [(s, p) for s, p in files if not p.startswith(("/tmp/_harness_check", "/tmp/work", "/tmp/audit"))]
     probs, produced = await self.script_outputs(files)
+    measured = []
     for size, path in files + produced:
       e = localtools.ext(path)
       if e not in (".ifc", ".json", ".csv", ".xlsx", ".xlsm", ".docx", ".pptx", ".pdf", ".dxf", ".zip"):
@@ -395,11 +525,50 @@ class EngineerAgent(Agent):
         self.forget(path)
         data = await self.fetch(path)
         issues = await asyncio.to_thread(localtools.validate, path, data)
+        fact = await asyncio.wait_for(asyncio.to_thread(localtools.facts, path, data), 150)
+        ex = self.exemplar_for(path)
+        diff = []
+        if ex:
+          diff = await asyncio.to_thread(localtools.exemplar_diff, path, data, ex, await self.fetch(ex))
       except Exception as exc:  # pylint: disable=broad-except
-        issues = [f"could not read: {exc}"]
+        issues, fact, diff, ex = [f"could not read: {exc}"], "", [], None
       if issues:
         probs.append(f"- {path}:\n    " + "\n    ".join(issues))
+      note = ""
+      if fact:
+        note += "\n  " + fact.replace("\n", "\n  ")
+      if diff:
+        note += (f"\n  structural differences from the task's own example {ex} (a grader built for the example"
+                 " may break on these):\n    " + "\n    ".join(diff))
+      if note:
+        measured.append(f"* {path}:{note}")
+    self.measured = "\n".join(measured)
     return probs
+
+  async def pre_issue_note(self) -> str | None:
+    """One-time note before the audit: unopened inputs and harness measurements of the outputs."""
+    parts = []
+    rest = [(sz, p) for sz, p in self.unopened()
+            if not p.endswith((".pyc", ".DS_Store")) and "/." not in p]
+    if rest and len(rest) <= 150:
+      rows = []
+      for sz, p in rest[:60]:
+        rows.append(f"  {sz / 1024:8.1f} KB  {p}" + (f"   :: {self.preview_map[p]}" if p in self.preview_map else ""))
+      parts.append(
+          f"You have not opened {len(rest)} of the {len(self.inputs)} project files. Decisive facts often sit in"
+          " files whose names look irrelevant (a calendar, an exhibit, a later letter, a checklist, a revision"
+          " log). Open each one that could bear on the task (inspect/view/read_file) and correct the deliverables"
+          " if anything changes; skip only what is clearly unrelated.\n" + "\n".join(rows)
+          + ("\n  ..." if len(rest) > 60 else ""))
+    if getattr(self, "measured", ""):
+      parts.append(
+          "The harness measured your output files the way a consumer would. Compare every line with what the"
+          " task and inputs require (units, real-world size, counts, types, overlaps) and fix any mismatch:\n"
+          + localtools.clip(self.measured, 12000))
+    if not parts:
+      return None
+    return ("Pre-issue check before the independent review.\n\n" + "\n\n".join(parts)
+            + "\n\nWhen done, answer with your updated final summary.")
 
   async def deliverable_dump(self) -> str:
     """Text of the files written during the task, for the reviewer."""
@@ -411,7 +580,7 @@ class EngineerAgent(Agent):
         " -not -name '*.pyc' -printf '%s\\t%p\\n' 2>/dev/null; done | sort -u -k2 | head -n 80",
         60)
     rows = [r.split("\t", 1) for r in (res.get("output") or "").strip().splitlines() if "\t" in r]
-    named = set(wanted_paths(self.session.instruction))
+    named = set(wanted_paths(self.session.instruction, self.session.workdir or ''))
     rows.sort(key=lambda r: (0 if any(r[1].startswith(n) for n in named) else 1, r[1]))
     parts, budget = [], REVIEW_CHARS
     listing = "\n".join(f"{int(s) / 1024:8.1f} KB  {p}" for s, p in rows)
@@ -441,29 +610,32 @@ class EngineerAgent(Agent):
     return "\n".join(parts)
 
   async def review(self, summary: str) -> str | None:
-    """Fresh-context QA review; returns defects, or None when clean/failed."""
+    """Independent check by a fresh-context agent with read-only tools; returns defects or None."""
     try:
       dump = await self.deliverable_dump()
     except taskbridge.TaskError as exc:
       await self.session.log(f"review: dump failed: {exc}")
-      return None
-    messages = [
-        {"role": "system", "content": REVIEW_SYSTEM},
-        {"role": "user", "content": (
-            "THE TASK:\n" + self.session.instruction
-            + "\n\nTHE ENGINEER'S SUMMARY:\n" + (summary or "(none)")
-            + "\n\nTHE DELIVERED FILES:\n" + dump)},
-    ]
+      dump = "(could not list the delivered files)"
+    rest = self.unopened()
+    unopened = "\n".join(f"  {p}" for _, p in rest[:80]) or "  (none)"
+    brief = (
+        "THE TASK:\n" + self.session.instruction
+        + "\n\nTHE COLLEAGUE'S SUMMARY:\n" + (summary or "(none)")
+        + "\n\nHARNESS MEASUREMENTS OF THE DELIVERED FILES:\n" + (getattr(self, "measured", "") or "(none)")
+        + f"\n\nINPUT FILES THE COLLEAGUE NEVER OPENED ({len(rest)} of {len(self.inputs)}):\n" + unopened
+        + "\n\nTHE DELIVERED FILES (text extraction; open them yourself to check details):\n"
+        + localtools.clip(dump, 60000))
     left = self.session.time_left()
-    reserve = self.finish_margin + (10 * 60 if left else 0)
+    minutes = 30.0 if left is None else max(5.0, min(45.0, AUDIT_SHARE * left / 60))
+    auditor = Auditor(self.session)
+    auditor.adopt(self)
     try:
-      reply = await self.stream(messages, "none", reserve)
-    except (openai.APIError, StreamCut, asyncio.TimeoutError, CutOff) as exc:
-      await self.session.log(f"review failed: {str(exc)[:200]}")
+      text = await auditor.audit(brief, minutes, AUDIT_STEPS)
+    except Exception as exc:  # pylint: disable=broad-except
+      await self.session.log(f"review failed: {type(exc).__name__}: {str(exc)[:200]}")
       return None
-    await self.report(reply)
-    text = visible(reply.text).strip()
-    await self.session.log(f"review {self.reviews}: {text[:600]}")
+    self.opened |= auditor.opened
+    await self.session.log(f"review {self.reviews} ({auditor.used} tool calls): {(text or '')[:4000]}")
     if not text or "NO_ISSUES" in text[:40]:
       return None
     return text
@@ -566,16 +738,84 @@ class EngineerAgent(Agent):
                 " with the format's standard library (e.g. ifcopenshell.api / ifcopenshell.guid.new() for IFC,"
                 " openpyxl, python-docx, ezdxf) instead of hand-writing it, re-open it to verify, then answer"
                 " with your summary.\n\n" + "\n".join(bad))
-    if self.reviews >= REVIEW_ROUNDS or self.minutes_left() < REVIEW_MIN_LEFT_MIN:
+    if self.minutes_left() < REVIEW_MIN_LEFT_MIN:
+      return None
+    if self.coverage_checks < 1:
+      self.coverage_checks += 1
+      note = await self.pre_issue_note()
+      if note:
+        await self.session.log(f"pre-issue note: {note[:600]}")
+        return note
+    if self.reviews >= REVIEW_ROUNDS:
       return None
     self.reviews += 1
     defects = await self.review(summary)
     if not defects:
       return None
-    return ("An independent senior engineer reviewed your deliverables (without seeing the input files) and"
-            " reported the issues below. Check each against the task and the inputs; fix every valid one in"
-            " the files themselves, ignore any that are wrong (the inputs win), re-open the changed files to"
-            " verify, then answer with your updated final summary.\n\n" + defects)
+    return ("An independent senior engineer checked your deliverables against the input files and the task, with"
+            " their own tools, and reported the issues below (with evidence). Verify each against the inputs; fix"
+            " every valid one in the files themselves (the inputs win over both of you), re-run the relevant"
+            " validation on the finished files, then answer with your updated final summary.\n\n" + defects)
+
+
+class Auditor(EngineerAgent):
+  """A fresh-context checker that shares the task session but must not change files."""
+
+  def adopt(self, parent: EngineerAgent) -> None:
+    """Takes over what the parent learned about the endpoint and the workspace."""
+    for name in ("output_ceiling", "context_window", "max_output", "token_limit", "effort", "responses",
+                 "finish_margin", "mcp", "inputs", "started"):
+      if hasattr(parent, name):
+        setattr(self, name, getattr(parent, name))
+    self.preview_map = getattr(parent, "preview_map", {})
+    self.tools = [t for t in parent.tools
+                  if (t.get("function") or {}).get("name") not in ("write_file", "edit_file")]
+    self.read_only = True
+    self.used = 0
+
+  async def audit(self, brief: str, minutes: float, steps: int) -> str | None:
+    import time  # pylint: disable=import-outside-toplevel
+
+    deadline = time.time() + minutes * 60
+    self.messages = [
+        {"role": "system", "content": AUDIT_SYSTEM.format(
+            workdir=self.session.workdir, minutes=int(minutes), steps=steps)},
+        {"role": "user", "content": brief},
+    ]
+    nudged = False
+    while True:
+      left = self.session.time_left()
+      over = (self.used >= steps or time.time() > deadline
+              or (left is not None and left < self.finish_margin + 600))
+      try:
+        if over:
+          self.messages.append({"role": "user", "content": (
+              "Stop investigating now. Answer with your verified findings (or exactly NO_ISSUES).")})
+          reply = await self.complete(tool_choice="none", head="")
+        else:
+          reply = await self.complete(head="")
+      except (OutOfTime, CutOff, openai.OpenAIError):
+        return None
+      if reply.text or reply.calls:
+        self.messages.append(reply.message())
+      if over or not reply.calls:
+        text = visible(reply.text).strip()
+        if text or over or nudged:
+          return text or None
+        nudged = True
+        self.messages.append({"role": "user", "content": "Answer with your findings, or exactly NO_ISSUES."})
+        continue
+      arguments = [parse_arguments(call) for call in reply.calls.values()]
+      for call, args in zip(reply.calls.values(), arguments):
+        result = await self.run_tool(call["name"], args) if isinstance(args, dict) else args
+        self.used += 1
+        self.messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
+      self.messages[-1]["content"] += (
+          f"\n[{max(0, steps - self.used)} tool calls and {max(0, int((deadline - time.time()) // 60))} minutes"
+          " left for this check]")
+      self.attach_images()
+      if self.prompt_tokens > self.compact_at():
+        await self.compact()
 
 
 async def solve(session: taskbridge.Session) -> str:
