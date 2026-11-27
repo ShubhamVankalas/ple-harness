@@ -962,8 +962,13 @@ class EngineerAgent(Agent):
           " defects: compare each line with what the task and the inputs require (units, real-world size,"
           " counts, types) and change a file only where a line contradicts them:\n"
           + localtools.clip(self.measured, 12000))
-    if not parts:
-      return None
+    parts.append(
+        "Source and consequence pass. (a) List each folder, document or record the task text names; for each,"
+        " the decisive fact you took from it (value and unit) and where your deliverable states it. If a named"
+        " source contributed nothing, open it again: it was named for a reason. (b) For each question the task"
+        " asks, write the consequence one step beyond your answer (who has the right or approval, what receives"
+        " the flow/load/cost, which stated value stops holding in the other condition, what the record lacks) and"
+        " confirm the deliverable says it plainly. Add what is missing to the deliverable itself.")
     return ("Pre-issue check before the independent review.\n\n" + "\n\n".join(parts)
             + "\n\nWhen done, leave correct work as it is." + AGAIN)
 
