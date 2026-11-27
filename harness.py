@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import posixpath
 import re
 import shlex
 import sys
@@ -65,7 +66,9 @@ name exactly.
 - Write structured deliverables (IFC, XLSX, DOCX, DXF, PDF) with the format's own library, never as hand-typed \
 text: e.g. ifcopenshell.api (root.create_entity, aggregate, spatial, geometry; real GUIDs; every product placed; \
 coordinates in the project's units and at the real scale of the inputs). Re-open each file with a strict reader and \
-check its contents before you finish; a file that fails to open scores zero.
+check its contents before you finish; a file that fails to open scores zero. Run every validation the task itself \
+prescribes, with exactly the settings it names; if the deliverable is a script, run it end to end the way the task \
+says it will be run and validate what it writes.
 - Never stop early: you have hours. Use the time to verify, cross-check against the inputs, and polish.
 
 Harness tools (they run outside the container, on a copy of the file):
@@ -343,10 +346,42 @@ class EngineerAgent(Agent):
     rows = [r.split("\t", 1) for r in (res.get("output") or "").strip().splitlines() if "\t" in r]
     return [(int(a), b) for a, b in rows if a.isdigit()]
 
+  async def script_outputs(self, files: list[tuple[int, str]]) -> tuple[list[str], list[tuple[int, str]]]:
+    """Runs delivered generator scripts the way a grader would; returns (problems, produced files)."""
+    instr = self.session.instruction
+    named = wanted_paths(instr)
+    scripts = [p for _, p in files if p.endswith(".py") and (
+        any(p == n or p.endswith("/" + n.lstrip("./")) for n in named) or "/output" in p or "/submission" in p)]
+    if not scripts or "sys.argv" not in instr and "argv" not in instr:
+      return [], []
+    m = re.search(r"\.(ifc|xlsx|docx|dxf|json|csv|pdf|pptx)\b", instr, re.I)
+    target_ext = "." + (m.group(1).lower() if m else "out")
+    probs, produced = [], []
+    for i, sc in enumerate(scripts[:3]):
+      out = f"/tmp/_harness_check{i}/candidate{target_ext}"
+      d = posixpath.dirname(out)
+      res = await self.session.exec(
+          f"rm -rf {d} && mkdir -p {d} && cd {shlex.quote(posixpath.dirname(sc))} && "
+          f"( time timeout 600 python3 {shlex.quote(sc)} {out} ) > {d}/log.txt 2>&1; echo EXIT=$?; "
+          f"tail -c 1500 {d}/log.txt; ls -la {d}", 700)
+      text = res.get("output") or ""
+      code = re.search(r"EXIT=(\d+)", text)
+      if not code or code.group(1) != "0":
+        probs.append(f"- {sc}: running it as the grader would (python3 {sc} <out>) failed:\n" + text[-1500:])
+        continue
+      listing = await self.session.exec(f"find {d} -type f -not -name log.txt -printf '%s\\t%p\\n'", 30)
+      rows = [r.split("\t", 1) for r in (listing.get("output") or "").splitlines() if "\t" in r]
+      if not rows:
+        probs.append(f"- {sc}: ran but wrote nothing to the path given as sys.argv[1]")
+      produced += [(int(a), b) for a, b in rows if a.isdigit()]
+    return probs, produced
+
   async def invalid_outputs(self) -> list[str]:
     """Format problems in the delivered files that a strict reader or grader would hit."""
-    probs = []
-    for size, path in await self.new_files():
+    files = await self.new_files()
+    files = [(s, p) for s, p in files if not p.startswith("/tmp/_harness_check")]
+    probs, produced = await self.script_outputs(files)
+    for size, path in files + produced:
       e = localtools.ext(path)
       if e not in (".ifc", ".json", ".csv", ".xlsx", ".xlsm", ".docx", ".pptx", ".pdf", ".dxf", ".zip"):
         continue

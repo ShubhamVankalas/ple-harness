@@ -415,7 +415,7 @@ def _ifc_problems(data: bytes) -> list[str]:
   out: list[str] = []
   try:
     log = ifcopenshell.validate.json_logger()
-    ifcopenshell.validate.validate(f, log, express_rules=False)
+    ifcopenshell.validate.validate(f, log, express_rules=True)
     kinds: dict[str, list[str]] = {}
     for st in log.statements:
       msg = str(st.get("message", st) if isinstance(st, dict) else st)
