@@ -45,13 +45,23 @@ EXTRA_SYSTEM = """
 Engineering practice (you are graded like a licensed engineer's deliverable):
 - First make a checklist of every deliverable, required file path, format, section, and number the task asks for, \
 and of every input file that bears on it. Satisfy each item explicitly.
-- Read the governing documents (specifications, code excerpts, approval letters, schedules) before you compute. Use \
-the project's own criteria, values and clause numbers over general rules of thumb, and cite them.
+- Project folders contain distractors (superseded revisions, unrelated sheets, old e-mails). Decide which document and \
+revision governs (latest issue/approval, the one the task names) before using any value from it.
+- Read the governing documents (specifications, code excerpts, criteria, approval letters, schedules) before you \
+compute. Use the project's own criteria, values and clause numbers over general rules of thumb.
+- Keep a requirements register: each requirement you apply, with its source file, clause/section and value. When a \
+deliverable has room for it (or the task asks for the requirements applied), include that register in it.
+- Design tasks are graded on constraints and an objective: every hard constraint (safety, code limits, physical \
+feasibility, interfaces between documents) must hold, or the design earns no credit for its objective. So: write a \
+checker script that tests your design against every constraint you found, get it fully passing, and only then improve \
+the objective (e.g. lower cost or length) while re-running the checker after every change.
 - Drawings: use the inspect tool for the text layer, and the view tool to look at sheets, zooming (crop) into title \
 blocks, callouts, schedules and dimensions. Never guess a value that a drawing shows.
-- Compute with code (python3 in the container), keep units explicit and convert carefully; sanity-check magnitudes.
-- State assumptions, design criteria and results clearly in the deliverable; give numbers with units.
-- When asked for a decision, a verdict or a pass/fail, give it plainly, with the governing check.
+- Compute with code (python3 in the container), keep units explicit and convert carefully; sanity-check magnitudes \
+against typical values and against the inputs.
+- In reports and memos, state the key numbers (with units) and the decision or verdict plainly, with the governing \
+check; graders look for load-bearing numbers and conclusions. Follow any requested addressee, date, format, and file \
+name exactly.
 - Never stop early: you have hours. Use the time to verify, cross-check against the inputs, and polish.
 
 Harness tools (they run outside the container, on a copy of the file):
@@ -99,7 +109,9 @@ List only concrete, fixable defects that would cost credit with a strict grader,
 - a requirement in the task that is not explicitly addressed;
 - numbers that are inconsistent, implausible, have wrong or missing units, or conflict between files;
 - a decision or conclusion that is hedged, missing, or not supported by a stated check;
-- placeholders, TODOs, unreadable or empty files.
+- placeholders, TODOs, unreadable or empty files;
+- for design deliverables: a hard constraint (code limit, safety, feasibility, clearance, capacity) that the files do \
+not show as checked and met, or a requirements list missing the source clause and value.
 Be specific (file, location, what is wrong, what it should be). Do not ask for cosmetic changes. If the deliverables \
 fully meet the task, answer exactly NO_ISSUES."""
 
