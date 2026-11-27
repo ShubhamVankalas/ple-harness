@@ -399,6 +399,112 @@ def ifc_text_plain(data: bytes) -> str:
       f"{k}={v}" for k, v in top[:80])
 
 
+# ---------------------------------------------------------------- validation
+
+
+def _ifc_problems(data: bytes) -> list[str]:
+  try:
+    import ifcopenshell  # pylint: disable=import-outside-toplevel
+    import ifcopenshell.validate  # pylint: disable=import-outside-toplevel
+  except ImportError:
+    return []
+  try:
+    f = ifcopenshell.file.from_string(data.decode("utf-8", "replace"))
+  except Exception as exc:  # pylint: disable=broad-except
+    return [f"does not parse as IFC: {str(exc)[:300]}"]
+  out: list[str] = []
+  try:
+    log = ifcopenshell.validate.json_logger()
+    ifcopenshell.validate.validate(f, log, express_rules=False)
+    kinds: dict[str, list[str]] = {}
+    for st in log.statements:
+      msg = str(st.get("message", st) if isinstance(st, dict) else st)
+      lines = [ln.strip() for ln in msg.splitlines() if ln.strip()]
+      attr = next((ln.split(":", 1)[0].replace("<attribute ", "attribute ") for ln in lines
+                   if ln.startswith("<attribute")), "")
+      key = next((ln for ln in lines if not ln.startswith(("On instance", "#", "^", "With attribute", "<"))),
+                 lines[0] if lines else "error")[:160]
+      if attr:
+        key = f"{attr}: {key}"
+      inst = next((ln for ln in lines if ln.startswith("#")), "")[:160]
+      kinds.setdefault(key, []).append(inst)
+    for key, insts in list(kinds.items())[:12]:
+      out.append(f"schema: {key} ({len(insts)}x, e.g. {insts[0]})")
+  except Exception as exc:  # pylint: disable=broad-except
+    out.append(f"schema validator crashed: {str(exc)[:200]}")
+  try:
+    if not f.by_type("IfcProject"):
+      out.append("no IfcProject")
+    noplace = [f"{e.is_a()} {e.Name!r}" for e in f.by_type("IfcProduct")
+               if getattr(e, "ObjectPlacement", None) is None]
+    if noplace:
+      out.append(f"{len(noplace)} products have no ObjectPlacement (readers crash or mislocate them): "
+                 + ", ".join(noplace[:8]))
+    if f.by_type("IfcProduct") and not f.by_type("IfcRelContainedInSpatialStructure") \
+        and not f.by_type("IfcRelAggregates"):
+      out.append("products are not linked into the spatial tree")
+  except Exception as exc:  # pylint: disable=broad-except
+    out.append(f"model walk failed: {str(exc)[:200]}")
+  return out
+
+
+def validate(path: str, data: bytes) -> list[str]:
+  """Problems a strict reader of this file format would hit ([] = looks valid)."""
+  e = ext(path)
+  try:
+    if not data:
+      return ["file is empty"]
+    if e == ".ifc":
+      return _ifc_problems(data)
+    if e == ".json":
+      json.loads(data.decode("utf-8"))
+    elif e in (".csv",):
+      import csv  # pylint: disable=import-outside-toplevel
+      rows = list(csv.reader(io.StringIO(data.decode("utf-8-sig"))))
+      widths = {len(r) for r in rows if r}
+      if len(widths) > 1:
+        return [f"rows have differing column counts {sorted(widths)[:6]}"]
+    elif e in (".xlsx", ".xlsm"):
+      import openpyxl  # pylint: disable=import-outside-toplevel
+      wb = openpyxl.load_workbook(io.BytesIO(data))
+      bad = []
+      for ws in wb.worksheets:
+        for row in ws.iter_rows():
+          for c in row:
+            v = c.value
+            if isinstance(v, str) and v.startswith("#") and v.rstrip("!?0/").upper() in (
+                "#REF", "#VALUE", "#DIV", "#NAME", "#N/A", "#NUM", "#NULL"):
+              bad.append(f"{ws.title}!{c.coordinate}={v}")
+      if bad:
+        return [f"error values in cells: {', '.join(bad[:10])}"]
+    elif e == ".docx":
+      import docx  # pylint: disable=import-outside-toplevel
+      docx.Document(io.BytesIO(data))
+    elif e == ".pptx":
+      import pptx  # pylint: disable=import-outside-toplevel
+      pptx.Presentation(io.BytesIO(data))
+    elif e == ".pdf":
+      import pdfplumber  # pylint: disable=import-outside-toplevel
+      with pdfplumber.open(io.BytesIO(data)) as pdf:
+        if not pdf.pages:
+          return ["PDF has no pages"]
+    elif e == ".dxf":
+      from ezdxf import recover  # pylint: disable=import-outside-toplevel
+      doc, auditor = recover.read(io.BytesIO(data))
+      errs = [str(x.message)[:120] for x in auditor.errors][:6]
+      if errs:
+        return ["DXF audit errors: " + "; ".join(errs)]
+      del doc
+    elif e == ".zip":
+      z = zipfile.ZipFile(io.BytesIO(data))
+      badf = z.testzip()
+      if badf:
+        return [f"corrupt member {badf}"]
+  except Exception as exc:  # pylint: disable=broad-except
+    return [f"cannot be opened as {e or 'this format'}: {type(exc).__name__}: {str(exc)[:240]}"]
+  return []
+
+
 # ---------------------------------------------------------------- dispatch
 
 

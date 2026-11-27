@@ -62,6 +62,10 @@ against typical values and against the inputs.
 - In reports and memos, state the key numbers (with units) and the decision or verdict plainly, with the governing \
 check; graders look for load-bearing numbers and conclusions. Follow any requested addressee, date, format, and file \
 name exactly.
+- Write structured deliverables (IFC, XLSX, DOCX, DXF, PDF) with the format's own library, never as hand-typed \
+text: e.g. ifcopenshell.api (root.create_entity, aggregate, spatial, geometry; real GUIDs; every product placed; \
+coordinates in the project's units and at the real scale of the inputs). Re-open each file with a strict reader and \
+check its contents before you finish; a file that fails to open scores zero.
 - Never stop early: you have hours. Use the time to verify, cross-check against the inputs, and polish.
 
 Harness tools (they run outside the container, on a copy of the file):
@@ -138,6 +142,7 @@ class EngineerAgent(Agent):
     self.image_msgs: list[dict[str, Any]] = []
     self.reviews = 0
     self.gate_checks = 0
+    self.format_checks = 0
     self.cache: dict[str, bytes] = {}
 
   # ------------------------------------------------------------ setup
@@ -326,6 +331,37 @@ class EngineerAgent(Agent):
         out.append(p)
     return out
 
+  async def new_files(self) -> list[tuple[int, str]]:
+    """(size, path) of files created or changed since the task started."""
+    wd = self.session.workdir or "/app"
+    roots = " ".join(shlex.quote(r) for r in dict.fromkeys([wd, "/filesystem", "/app"]))
+    res = await self.session.exec(
+        f"for r in {roots}; do [ -d \"$r\" ] && find \"$r\" -xdev -type f -newermt"
+        f" @{int(self.started)} -not -path '*/.git/*' -not -path '*/__pycache__/*'"
+        " -not -name '*.pyc' -printf '%s\\t%p\\n' 2>/dev/null; done | sort -u -k2 | head -n 200",
+        60)
+    rows = [r.split("\t", 1) for r in (res.get("output") or "").strip().splitlines() if "\t" in r]
+    return [(int(a), b) for a, b in rows if a.isdigit()]
+
+  async def invalid_outputs(self) -> list[str]:
+    """Format problems in the delivered files that a strict reader or grader would hit."""
+    probs = []
+    for size, path in await self.new_files():
+      e = localtools.ext(path)
+      if e not in (".ifc", ".json", ".csv", ".xlsx", ".xlsm", ".docx", ".pptx", ".pdf", ".dxf", ".zip"):
+        continue
+      if size > 40_000_000:
+        continue
+      try:
+        self.forget(path)
+        data = await self.fetch(path)
+        issues = await asyncio.to_thread(localtools.validate, path, data)
+      except Exception as exc:  # pylint: disable=broad-except
+        issues = [f"could not read: {exc}"]
+      if issues:
+        probs.append(f"- {path}:\n    " + "\n    ".join(issues))
+    return probs
+
   async def deliverable_dump(self) -> str:
     """Text of the files written during the task, for the reviewer."""
     wd = self.session.workdir or "/app"
@@ -478,6 +514,19 @@ class EngineerAgent(Agent):
       return ("These output paths named in the task do not exist yet: " + ", ".join(missing)
               + ". Create each one exactly there (or, if one is not actually a deliverable, say why),"
                 " then answer with your summary.")
+    if self.format_checks < 3:
+      try:
+        bad = await self.invalid_outputs()
+      except Exception:  # pylint: disable=broad-except
+        bad = []
+      if bad:
+        self.format_checks += 1
+        await self.session.log(f"format gate: {bad}"[:1500])
+        return ("A strict file validator (the kind graders use) found problems in your output files. Files that"
+                " fail to open or validate usually score zero. Fix each one, preferably by generating the file"
+                " with the format's standard library (e.g. ifcopenshell.api / ifcopenshell.guid.new() for IFC,"
+                " openpyxl, python-docx, ezdxf) instead of hand-writing it, re-open it to verify, then answer"
+                " with your summary.\n\n" + "\n".join(bad))
     if self.reviews >= REVIEW_ROUNDS or self.minutes_left() < REVIEW_MIN_LEFT_MIN:
       return None
     self.reviews += 1
