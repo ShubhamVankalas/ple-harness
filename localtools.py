@@ -93,8 +93,8 @@ def pdf_text(data: bytes, pages: Any = None, tables: bool = True) -> str:
         text = f"(text extraction failed: {exc})"
       words = len(text.split())
       out.append(
-          f"\n===== page {i + 1} ({page.width / 72:.1f}x"
-          f"{page.height / 72:.1f}in, {words} words) ====="
+          f"\n[[page {i + 1} ({page.width / 72:.1f}x"
+          f"{page.height / 72:.1f}in, {words} words)]]"
       )
       out.append(text.strip() or "(no text layer: use view to see it)")
       if tables:
@@ -105,7 +105,7 @@ def pdf_text(data: bytes, pages: Any = None, tables: bool = True) -> str:
                            for c in row)
                 for row in table[:80]
             ]
-            out.append(f"--- table {t_n + 1} on page {i + 1} ---")
+            out.append(f"[[extracted table {t_n + 1} on page {i + 1}]]")
             out.append("\n".join(rows))
         except Exception:  # pylint: disable=broad-except
           pass
@@ -214,8 +214,8 @@ def xlsx_text(data: bytes, sheet: Any = None, cells: str | None = None) -> str:
   for name in chosen:
     ws_f, ws_v = wb_f[name], wb_v[name]
     out.append(
-        f"\n===== sheet {name!r} ({ws_f.max_row} rows x {ws_f.max_column}"
-        f" cols, used range {ws_f.dimensions}) ====="
+        f"\n[[sheet {name!r} ({ws_f.max_row} rows x {ws_f.max_column}"
+        f" cols, used range {ws_f.dimensions})]]"
     )
     rng = ws_f[cells] if cells else ws_f.iter_rows()
     if cells and not isinstance(rng, tuple):
@@ -259,7 +259,7 @@ def docx_text(data: bytes) -> str:
     elif child.tag == qn("w:tbl"):
       t_n += 1
       table = docx.table.Table(child, d)
-      out.append(f"--- table {t_n} ---")
+      out.append(f"[[table {t_n}: {len(table.rows)} rows x {len(table.columns)} cols, cells joined with |]]")
       for row in table.rows[:120]:
         out.append(" | ".join(c.text.strip().replace("\n", " ")
                               for c in row.cells))
@@ -286,7 +286,7 @@ def pptx_text(data: bytes) -> str:
   prs = pptx.Presentation(io.BytesIO(data))
   out = []
   for i, slide in enumerate(prs.slides):
-    out.append(f"===== slide {i + 1} =====")
+    out.append(f"[[slide {i + 1}]]")
     for shape in slide.shapes:
       if shape.has_text_frame and shape.text_frame.text.strip():
         out.append(shape.text_frame.text.strip())
@@ -547,7 +547,7 @@ def inspect(path: str, data: bytes, pages: Any = None, sheet: Any = None,
       book = xlrd.open_workbook(file_contents=data)
       out = []
       for sh in book.sheets():
-        out.append(f"===== sheet {sh.name!r} =====")
+        out.append(f"[[sheet {sh.name!r}]]")
         for r in range(sh.nrows):
           out.append(" | ".join(str(v) for v in sh.row_values(r)))
       return clip("\n".join(out))

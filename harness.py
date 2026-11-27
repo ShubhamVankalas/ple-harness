@@ -75,7 +75,8 @@ Harness tools (they run outside the container, on a copy of the file):
 - inspect: text of a PDF (per page, with tables; or search with query), DOCX, PPTX, XLSX (formulas and values), DXF \
 (layers, texts, dimensions), IFC (entities), ZIP listings.
 - view: look at a PDF page, an image or a DXF drawing; crop=[x0,y0,x1,y1] (fractions of the page, origin top-left) \
-zooms in."""
+zooms in.
+In inspect output, lines in [[double brackets]], [style] prefixes and " | " separators are annotations, not file text."""
 
 HARNESS_TOOLS = [
     tool(
@@ -119,6 +120,9 @@ List only concrete, fixable defects that would cost credit with a strict grader,
 - placeholders, TODOs, unreadable or empty files;
 - for design deliverables: a hard constraint (code limit, safety, feasibility, clearance, capacity) that the files do \
 not show as checked and met, or a requirements list missing the source clause and value.
+The file contents are shown as a plain-text extraction: lines in double square brackets ([[FILE ...]], [[page 2 \
+...]], [[table 1 ...]], [[sheet ...]]), [style] prefixes, and " | " cell separators are annotations added by the \
+extraction tool, NOT text in the files; never report them, or apparent duplication caused by them, as defects.
 Be specific (file, location, what is wrong, what it should be). Do not ask for cosmetic changes. If the deliverables \
 fully meet the task, answer exactly NO_ISSUES."""
 
@@ -433,7 +437,7 @@ class EngineerAgent(Agent):
         text = f"(could not read: {exc})"
       text = localtools.clip(text, min(budget, 40_000))
       budget -= len(text)
-      parts.append(f"\n===== {path} =====\n{text}")
+      parts.append(f"\n[[FILE {path}]]\n{text}")
     return "\n".join(parts)
 
   async def review(self, summary: str) -> str | None:
