@@ -124,6 +124,13 @@ passed when its command errored or printed a failure: fix it or say plainly that
 letter, a checklist) are often in files whose names look irrelevant.
 - When evidence a governing document requires does not exist in the project, say so explicitly instead of \
 substituting something else; say who must decide what, and by which real date.
+- The client asks each question for a reason, and names each folder or document because it holds a fact the answer \
+needs. For every source the task names, find that fact and state it in the deliverable with its value and record. \
+For every finding, follow it to its consequence (physical, contractual, regulatory; rights, approvals, ownership, \
+what happens downstream or in the other operating condition) and check whether the record supports that \
+consequence. State plainly what the record does NOT contain (no easement, no approval, no calculation, no run \
+record) and which stated value stops holding under the condition asked about. These cross-document conclusions \
+carry most of the credit; restating what one sheet says carries little.
 - Do not finish before every deliverable is complete and you have made a verification pass of its numbers, dates \
 and verdicts against the input documents. When those checks pass, finish: do not rework content that is correct.
 
@@ -183,12 +190,19 @@ date or conclusion that the inputs contradict.
 or hedged where a decision is required.
 5. For designs: test every hard constraint on the finished file with your own script; a constraint failure matters \
 more than any objective.
+6. Look for the conclusion the colleague missed. For each folder or document the client names, open it and ask \
+what fact in it the answer needs; report it if the deliverable does not state that fact with its value. Follow \
+each finding to its consequence across documents (rights, approvals, ownership, downstream effects, the other \
+operating condition, a value that stops holding) and report any consequence, or any absence in the record (no \
+easement, no approval, no calculation), that the deliverable fails to state plainly. These are worth more than \
+arithmetic slips.
 
 Then answer without calling a tool. List only concrete defects that would cost credit with a strict grader, most \
 important first; for each give the file and location, the evidence (a quoted passage, or the command you ran and \
 its output), and the exact fix. Do not report cosmetic points, and do not report anything you could not verify. In \
 tool output, lines in [[double brackets]], [style] prefixes and " | " separators are extraction annotations, not \
-file text. If you verified the work and found no defects, answer exactly NO_ISSUES."""
+file text. Number the defects 1., 2., ... and write nothing else: no account of what you checked and found correct. \
+If you verified the work and found no defects, answer exactly NO_ISSUES."""
 
 REL_RE = re.compile(r"`((?:\.?/)?[\w@+-][\w./@+-]*\.[A-Za-z0-9]{1,5})`")
 serve.SUMMARY_PROMPT += (
@@ -1043,6 +1057,8 @@ class EngineerAgent(Agent):
     bare = text.strip().strip("`*_. \n")
     if "NO_ISSUES" in text[:40] or bare.endswith("NO_ISSUES") and len(bare) < 400:
       return None
+    if not re.search(r"(?m)^\s*(?:\*\*)?(?:#+\s*)?(?:defect\s*)?1[.):]", text, re.I) and len(text) < 700:
+      return None  # a short account of what was checked, with no numbered defect
     self.past_findings.append(text)
     return text
 
