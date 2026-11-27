@@ -1,0 +1,9 @@
+name: ple-engineer
+model_api: google-cloud/gemini-4-neon
+install: >-
+  uv venv --python 3.12 /opt/harness/venv
+  && uv pip install --python /opt/harness/venv/bin/python -r {src}/requirements.txt
+serve: /opt/harness/venv/bin/python {src}/harness.py
+env:
+  COMPACT_AT_TOKENS: "300000"
+  REVIEW_ROUNDS: "2"
