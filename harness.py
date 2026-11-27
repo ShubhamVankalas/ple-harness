@@ -201,6 +201,9 @@ class EngineerAgent(Agent):
     self.opened: set[str] = set()
     self.coverage_checks = 0
     self.read_only = False
+    self.errors: list[str] = []
+    self.edits: dict[str, int] = {}
+    self.calls = 0
 
   # ------------------------------------------------------------ setup
 
@@ -365,7 +368,37 @@ class EngineerAgent(Agent):
       return await self.tool_inspect(**args)
     if name == "view":
       return await self.tool_view(**args)
-    return await super().run_tool(name, args)
+    result = await super().run_tool(name, args)
+    return result + self.governor(name, args, result)
+
+  def governor(self, name: str, args: dict[str, Any], result: str) -> str:
+    """Short advice appended to a tool result when the work shows signs of churn."""
+    note = ""
+    failed = result.startswith("error:") or (
+        result.startswith("exit code") and not result.startswith("exit code 0")) or "Traceback (most recent" in result
+    if failed:
+      lines = [ln.strip() for ln in result.splitlines() if ln.strip() and not ln.startswith("[")]
+      sig = re.sub(r"\d+", "#", lines[-1])[:160] if lines else "error"
+      self.errors.append(sig)
+      recent = self.errors[-8:]
+      if recent.count(sig) in (3, 6):
+        note += ("\n[harness: this same error has now come back " + str(recent.count(sig)) + " times. Stop trying"
+                 " variations: read the real interface (python3 -c 'help(...)', --help, the file itself), or take a"
+                 " different approach. Do not skip the step or report it as passed.]")
+    else:
+      self.errors.append("")
+    if name in ("write_file", "edit_file"):
+      path = self.path(str(args.get("path", "")))
+      n = self.edits[path] = self.edits.get(path, 0) + 1
+      if n in (30, 60, 100):
+        note += (f"\n[harness: {n} writes to {path}. Before more local patches, measure what the finished output"
+                 " really contains (inspect it; check units, scale, counts against the inputs) and re-read your"
+                 " notes: repeated patching usually means a wrong assumption upstream.]")
+    self.calls += 1
+    if self.calls % 150 == 0:
+      note += (f"\n[harness: {self.calls} tool calls so far. Update /tmp/work/NOTES.md, re-check the task's"
+               " requirements list, and make sure a complete, valid version of every deliverable is on disk now.]")
+    return note
 
   async def tool_inspect(self, path: str = "", pages: Any = None, sheet: Any = None,
                          cells: Any = None, query: Any = None, **_: Any) -> str:
