@@ -18,6 +18,10 @@ from typing import Any
 MAX_TEXT = 60_000  # characters one inspect call returns
 RENDER_DPI = 110  # default page render resolution
 MAX_SIDE = 2000  # longest side of an image sent to the model, in pixels
+# Above this size an IFC model is only parsed: no EXPRESS rules, no tessellation (2 CPU / 4 GB container).
+IFC_HEAVY_BYTES = 8_000_000
+IFC_PLAIN_BYTES = 60_000_000  # above this, an IFC file is only read as text
+IFC_MAX_PRODUCTS = 3000  # the geometry scan is skipped above this many products with geometry
 
 TEXT_EXT = {
     ".txt", ".md", ".csv", ".tsv", ".json", ".yaml", ".yml", ".xml", ".html",
@@ -45,6 +49,8 @@ def clip(text: str, limit: int = MAX_TEXT) -> str:
 
 def parse_range(spec: Any, count: int) -> list[int]:
   """Turns '1-3,7' (1-based) or an int into 0-based indexes within count."""
+  if isinstance(spec, (list, tuple)):
+    spec = ",".join(str(v) for v in spec)
   if spec in (None, "", "all"):
     return list(range(count))
   out: list[int] = []
@@ -70,22 +76,32 @@ def pdf_info(data: bytes) -> str:
   import pypdfium2 as pdfium  # pylint: disable=import-outside-toplevel
 
   doc = pdfium.PdfDocument(data)
-  sizes = []
-  for i in range(len(doc)):
-    w, h = doc[i].get_size()
-    sizes.append(f"{w / 72:.1f}x{h / 72:.1f}in")
-  uniq = sorted(set(sizes))
-  return f"PDF, {len(doc)} pages, page sizes: {', '.join(uniq[:6])}"
+  try:
+    sizes, n = [], len(doc)
+    for i in range(min(n, 400)):
+      w, h = doc[i].get_size()
+      sizes.append(f"{w / 72:.1f}x{h / 72:.1f}in")
+    uniq = sorted(set(sizes))
+    return f"PDF, {n} pages, page sizes: {', '.join(uniq[:6])}"
+  finally:
+    doc.close()
 
 
 def pdf_text(data: bytes, pages: Any = None, tables: bool = True) -> str:
   import pdfplumber  # pylint: disable=import-outside-toplevel
 
   out = []
+  whole = pages in (None, "", "all")
+  size = 0
   with pdfplumber.open(io.BytesIO(data)) as pdf:
     idx = parse_range(pages, len(pdf.pages))
-    out.append(f"[PDF with {len(pdf.pages)} pages; showing {len(idx)}]")
+    out.append(f"[PDF with {len(pdf.pages)} pages; {len(idx)} requested]")
     for i in idx:
+      if size > MAX_TEXT * (1.0 if whole else 3.0):
+        out.append(f"\n[[stopped before page {i + 1} of {len(pdf.pages)}: the text so far fills one result."
+                   f" Ask for the next pages (pages='{i + 1}-{min(len(pdf.pages), i + 30)}') or search with"
+                   " query]]")
+        break
       page = pdf.pages[i]
       try:
         text = page.extract_text(layout=False) or ""
@@ -112,6 +128,11 @@ def pdf_text(data: bytes, pages: Any = None, tables: bool = True) -> str:
       if words < 15:
         out.append("(little text here: this page is probably a drawing; use"
                    " view to look at it)")
+      size = sum(len(x) for x in out)
+      try:
+        page.close()  # pdfplumber otherwise keeps every visited page's objects (GBs on long PDFs)
+      except Exception:  # pylint: disable=broad-except
+        pass
   return "\n".join(out)
 
 
@@ -122,11 +143,21 @@ def pdf_search(data: bytes, query: str) -> str:
   hits = []
   with pdfplumber.open(io.BytesIO(data)) as pdf:
     for i, page in enumerate(pdf.pages):
-      text = page.extract_text() or ""
+      try:
+        text = page.extract_text() or ""
+      except Exception:  # pylint: disable=broad-except
+        text = ""
       for line in text.splitlines():
         if q in line.lower():
           hits.append(f"p{i + 1}: {line.strip()}")
-  return "\n".join(hits[:300]) or f"no line contains {query!r}"
+      try:
+        page.close()
+      except Exception:  # pylint: disable=broad-except
+        pass
+      if len(hits) >= 300:
+        hits = hits[:300] + [f"[300 matches shown; stopped at page {i + 1} of {len(pdf.pages)}]"]
+        break
+  return "\n".join(hits) or f"no line contains {query!r}"
 
 
 def render_pdf(
@@ -136,6 +167,13 @@ def render_pdf(
   import pypdfium2 as pdfium  # pylint: disable=import-outside-toplevel
 
   doc = pdfium.PdfDocument(data)
+  try:
+    return _render_pdf(doc, page, dpi, crop)
+  finally:
+    doc.close()
+
+
+def _render_pdf(doc: Any, page: int, dpi: int, crop: Any) -> bytes:
   if not 1 <= page <= len(doc):
     raise ValueError(f"page {page} is out of range 1-{len(doc)}")
   pg = doc[page - 1]
@@ -178,6 +216,9 @@ def png(img: Any) -> bytes:
     img.thumbnail((MAX_SIDE, MAX_SIDE))
   buf = io.BytesIO()
   img.save(buf, format="PNG", optimize=True)
+  if buf.tell() > 3_500_000:  # photos: endpoints refuse very large images
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="JPEG", quality=85)
   return buf.getvalue()
 
 
@@ -220,14 +261,27 @@ def xlsx_text(data: bytes, sheet: Any = None, cells: str | None = None) -> str:
         f"\n[[sheet {name!r} ({ws_f.max_row} rows x {ws_f.max_column}"
         f" cols, used range {ws_f.dimensions})]]"
     )
-    rng = ws_f[cells] if cells else ws_f.iter_rows()
-    if cells and not isinstance(rng, tuple):
-      rng = ((rng,),)
-    elif cells and rng and not isinstance(rng[0], tuple):
-      rng = (rng,)
-    for row in rng:
+    # Only cells that exist: iter_rows() creates one object per position of the used range, and a single
+    # stray cell far away makes that millions of cells.
+    lo_c, lo_r, hi_c, hi_r = 1, 1, 1 << 30, 1 << 30
+    if cells:
+      from openpyxl.utils import range_boundaries  # pylint: disable=import-outside-toplevel
+      try:
+        b = range_boundaries(str(cells).replace("$", "").upper())
+      except Exception:  # pylint: disable=broad-except
+        return f"cells={cells!r} is not a range like 'A1:K60'"
+      lo_c, lo_r, hi_c, hi_r = b[0] or 1, b[1] or 1, b[2] or 1 << 30, b[3] or 1 << 30
+    by_row: dict[int, list[Any]] = {}
+    for (r, col), cell in list(ws_f._cells.items()):  # pylint: disable=protected-access
+      if lo_r <= r <= hi_r and lo_c <= col <= hi_c and cell.value is not None:
+        by_row.setdefault(r, []).append(cell)
+    size = 0
+    for r in sorted(by_row):
+      if size > MAX_TEXT * 1.3:
+        out.append(f"[[stopped at row {r}: ask for a cells range or another sheet]]")
+        break
       parts = []
-      for c in row:
+      for c in sorted(by_row[r], key=lambda x: x.column):
         if c.value is None:
           continue
         v = ws_v[c.coordinate].value
@@ -237,7 +291,8 @@ def xlsx_text(data: bytes, sheet: Any = None, cells: str | None = None) -> str:
           parts.append(f"{c.coordinate}={c.value!r}")
       if parts:
         out.append("; ".join(parts))
-    merged = list(ws_f.merged_cells.ranges)[:30]
+        size += len(out[-1])
+    merged =list(ws_f.merged_cells.ranges)[:30]
     if merged:
       out.append(f"(merged: {', '.join(str(m) for m in merged)})")
   return "\n".join(out)
@@ -354,6 +409,9 @@ def dxf_text(data: bytes) -> str:
 
 
 def ifc_text(data: bytes) -> str:
+  if len(data) > IFC_PLAIN_BYTES:
+    return (f"[model is {len(data) >> 20} MB: read as text only; use bash in the container for queries]\n"
+            + ifc_text_plain(data))
   try:
     import ifcopenshell  # pylint: disable=import-outside-toplevel
   except ImportError:
@@ -391,18 +449,21 @@ def ifc_text(data: bytes) -> str:
 
 
 def ifc_text_plain(data: bytes) -> str:
-  text = data.decode("utf-8", "replace")
+  import re  # pylint: disable=import-outside-toplevel
   counts: dict[str, int] = {}
-  for line in text.splitlines():
-    if line.startswith("#") and "=" in line:
-      kind = line.split("=", 1)[1].strip().split("(", 1)[0]
-      counts[kind] = counts.get(kind, 0) + 1
+  for m in re.finditer(rb"^#\d+\s*=\s*(\w+)", data, re.M):
+    kind = m.group(1).decode("ascii", "replace")
+    counts[kind] = counts.get(kind, 0) + 1
   top = sorted(counts.items(), key=lambda kv: -kv[1])
   return "[IFC (parsed as text)] entity counts: " + ", ".join(
       f"{k}={v}" for k, v in top[:80])
 
 
 # ---------------------------------------------------------------- validation
+
+
+class _Skip(Exception):
+  pass
 
 
 def _ifc_problems(data: bytes) -> list[str]:
@@ -417,6 +478,8 @@ def _ifc_problems(data: bytes) -> list[str]:
     return [f"does not parse as IFC: {str(exc)[:300]}"]
   out: list[str] = []
   try:
+    if len(data) > IFC_HEAVY_BYTES:
+      raise _Skip()  # facts() says that the schema rules were not run
     log = ifcopenshell.validate.json_logger()
     ifcopenshell.validate.validate(f, log, express_rules=True)
     kinds: dict[str, list[str]] = {}
@@ -433,8 +496,11 @@ def _ifc_problems(data: bytes) -> list[str]:
       kinds.setdefault(key, []).append(inst)
     for key, insts in list(kinds.items())[:12]:
       out.append(f"schema: {key} ({len(insts)}x, e.g. {insts[0]})")
+  except _Skip:
+    pass
   except Exception as exc:  # pylint: disable=broad-except
-    out.append(f"schema validator crashed: {str(exc)[:200]}")
+    out.append(f"advisory: the harness's schema validator crashed ({str(exc)[:200]}); run the task's own"
+               " validator")
   try:
     if not f.by_type("IfcProject"):
       out.append("no IfcProject")
@@ -461,24 +527,35 @@ def validate(path: str, data: bytes) -> list[str]:
     if e == ".ifc":
       return _ifc_problems(data)
     if e == ".json":
-      json.loads(data.decode("utf-8"))
+      text = data.decode("utf-8")
+      try:
+        json.loads(text)
+      except ValueError as exc:
+        try:
+          for line in text.splitlines():
+            if line.strip():
+              json.loads(line)
+        except ValueError:
+          raise exc from None
+        return ["advisory: this is JSON Lines (one document per line), not a single JSON document; fine only if"
+                " the task asks for that"]
     elif e in (".csv",):
       import csv  # pylint: disable=import-outside-toplevel
       rows = list(csv.reader(io.StringIO(data.decode("utf-8-sig"))))
       widths = {len(r) for r in rows if r}
       if len(widths) > 1:
-        return [f"rows have differing column counts {sorted(widths)[:6]}"]
+        return [f"advisory: rows have differing column counts {sorted(widths)[:6]} (fine only if the task's"
+                " format has title or comment rows)"]
     elif e in (".xlsx", ".xlsm"):
       import openpyxl  # pylint: disable=import-outside-toplevel
       wb = openpyxl.load_workbook(io.BytesIO(data))
       bad = []
       for ws in wb.worksheets:
-        for row in ws.iter_rows():
-          for c in row:
-            v = c.value
-            if isinstance(v, str) and v.startswith("#") and v.rstrip("!?0/").upper() in (
-                "#REF", "#VALUE", "#DIV", "#NAME", "#N/A", "#NUM", "#NULL"):
-              bad.append(f"{ws.title}!{c.coordinate}={v}")
+        for c in list(ws._cells.values()):  # pylint: disable=protected-access
+          v = c.value
+          if isinstance(v, str) and v.startswith("#") and v.rstrip("!?0/").upper() in (
+              "#REF", "#VALUE", "#DIV", "#NAME", "#N/A", "#NUM", "#NULL"):
+            bad.append(f"{ws.title}!{c.coordinate}={v}")
       if bad:
         return [f"error values in cells: {', '.join(bad[:10])}"]
     elif e == ".docx":
@@ -525,8 +602,16 @@ def _ifc_signature(f: Any) -> dict[str, Any]:
   props: dict[str, str] = {}
   for ps in f.by_type("IfcPropertySet"):
     for pr in ps.HasProperties or []:
-      val = getattr(pr, "NominalValue", None)
-      kind = val.is_a() if hasattr(val, "is_a") else type(val).__name__
+      if not pr.is_a("IfcPropertySingleValue"):
+        kind = pr.is_a()  # enumerated, bounded, list, table ... values have no NominalValue by design
+      else:
+        val = pr.NominalValue
+        if val is None:
+          kind = "(no value)"
+        elif hasattr(val, "is_a"):
+          kind = val.is_a()
+        else:
+          kind = "RAW python " + type(val).__name__
       props.setdefault(f"{ps.Name}.{pr.Name}", kind)
   typing: dict[str, str] = {}
   for e in f.by_type("IfcProduct"):
@@ -540,6 +625,10 @@ def ifc_facts(data: bytes, max_products: int = 4000) -> str:
   """What a consumer of the model would measure: units, extents, structure, properties."""
   f = _ifc_open(data)
   out = [f"schema {f.schema}"]
+  big = len(data) > IFC_HEAVY_BYTES
+  if big:
+    out.append(f"[model is {len(data) / 1e6:.0f} MB: the harness did not run the EXPRESS schema rules or the"
+               " geometry scan on it; use the task's own validator or bash in the container for those]")
   try:
     import ifcopenshell.util.unit as uu  # pylint: disable=import-outside-toplevel
     scale = uu.calculate_unit_scale(f)
@@ -567,11 +656,16 @@ def ifc_facts(data: bytes, max_products: int = 4000) -> str:
   if sig["props"]:
     out.append("property sets (Pset.Property: value type): "
                + ", ".join(f"{k}: {v}" for k, v in list(sig["props"].items())[:80]))
-    raw = [k for k, v in sig["props"].items() if not v.startswith("Ifc")]
+    raw = [f"{k} ({v})" for k, v in sig["props"].items() if v.startswith("RAW ")]
     if raw:
-      out.append(f"WARNING: {len(raw)} property values are untyped (not wrapped as IfcLabel/IfcReal/...),"
-                 f" which crashes readers that call .wrappedValue: {', '.join(raw[:8])}")
+      out.append(f"WARNING: {len(raw)} IfcPropertySingleValue.NominalValue entries came back from the parser as a"
+                 " bare python value instead of an IfcValue entity (IfcLabel/IfcReal/...); readers that call"
+                 f" .wrappedValue would fail on them: {', '.join(raw[:8])}")
   # extents by tessellation
+  if big or len(prods) > IFC_MAX_PRODUCTS:
+    if not big:
+      out.append(f"[geometry scan skipped: {len(prods)} products with geometry is too many for the harness]")
+    return "\n".join(out)
   try:
     import time  # pylint: disable=import-outside-toplevel
     import ifcopenshell.geom  # pylint: disable=import-outside-toplevel
@@ -580,8 +674,8 @@ def ifc_facts(data: bytes, max_products: int = 4000) -> str:
     lo, hi, per_cls, failed, t0 = [1e30] * 3, [-1e30] * 3, {}, 0, time.time()
     boxes = []
     for e in prods[:max_products]:
-      if time.time() - t0 > 60:
-        out.append("[extent scan stopped after 60 s]")
+      if time.time() - t0 > 45:
+        out.append(f"[extent scan stopped after 45 s: {len(boxes)} of {len(prods)} products measured]")
         break
       try:
         shape = ifcopenshell.geom.create_shape(settings, e)
@@ -604,7 +698,10 @@ def ifc_facts(data: bytes, max_products: int = 4000) -> str:
       for k, c in list(per_cls.items())[:25]:
         out.append(f"  {k}: x {c[0]:.2f}..{c[3]:.2f}, y {c[1]:.2f}..{c[4]:.2f}, z {c[2]:.2f}..{c[5]:.2f} m")
       # axis-aligned box overlaps between different elements (coarse clash indication)
-      if len(boxes) <= 1500:
+      skip = ("IfcSpace", "IfcOpeningElement", "IfcSite", "IfcVirtualElement", "IfcAnnotation", "IfcGrid",
+              "IfcBuilding", "IfcBuildingStorey")
+      boxes = [x for x in boxes if not any(x[0].is_a(k) for k in skip)]
+      if 1 < len(boxes) <= 1500:
         tol, hits, n_hits = 0.002, [], 0
         for i in range(len(boxes)):
           a = boxes[i][1]
@@ -615,9 +712,14 @@ def ifc_facts(data: bytes, max_products: int = 4000) -> str:
               n_hits += 1
               if len(hits) < 8:
                 hits.append(f"{boxes[i][0].is_a()} {boxes[i][0].Name!r} x {boxes[j][0].is_a()} {boxes[j][0].Name!r}")
-        out.append(f"bounding boxes of different elements overlapping by > 2 mm: {n_hits} pairs"
-                   + (" (e.g. " + "; ".join(hits) + ")" if hits else "")
-                   + " [boxes are coarse: an overlap is a possible clash, not a proven one]")
+        if n_hits > max(5, len(boxes) // 10):
+          out.append(f"axis-aligned bounding boxes: {n_hits} overlapping pairs among {len(boxes)} elements, i.e."
+                     " many touching or nested elements. NOT conclusive about clashes (boxes of diagonal, hosted"
+                     " or connected elements always overlap); run a real clash test if the task requires one.")
+        else:
+          out.append(f"axis-aligned bounding boxes overlapping by > 2 mm: {n_hits} pairs among {len(boxes)}"
+                     " elements" + (" (" + "; ".join(hits) + ")" if hits else "")
+                     + " [coarse indication only: a box overlap is a place to look, not a proven clash]")
     if failed:
       out.append(f"WARNING: geometry of {failed} products could not be built (a viewer would drop them)")
   except Exception as exc:  # pylint: disable=broad-except
@@ -752,7 +854,11 @@ def preview(path: str, data: bytes, limit: int = 220) -> str:
       from PIL import Image  # pylint: disable=import-outside-toplevel
       img = Image.open(io.BytesIO(data))
       return f"(image {img.size[0]}x{img.size[1]}; use view)"
-    elif e in (".dxf", ".ifc", ".zip", ".xls"):
+    elif e == ".ifc":  # text level only: parsing a large model takes a minute and a gigabyte
+      head, text = f"[IFC, {len(data) / 1e6:.1f} MB] ", ifc_text_plain(data[:4_000_000])
+    elif e == ".dxf" and len(data) > 4_000_000:
+      return f"(DXF, {len(data) / 1e6:.1f} MB; use inspect or view)"
+    elif e in (".dxf", ".zip", ".xls"):
       head, text = "", inspect(path, data)
     else:
       if b"\0" in data[:4096]:
@@ -791,7 +897,7 @@ def inspect(path: str, data: bytes, pages: Any = None, sheet: Any = None,
     return clip(grep(dxf_text(data), query))
   if e in (".ifc", ".ifczip"):
     text = ifc_text(data)
-    if e == ".ifc" and not query:
+    if e == ".ifc" and not query and len(data) <= IFC_PLAIN_BYTES:
       text = "[[measured facts]]\n" + facts(path, data) + "\n[[entities]]\n" + text
     return clip(grep(text, query))
   if e == ".zip":
@@ -863,4 +969,5 @@ def render_dxf(data: bytes, crop: Any = None) -> bytes:
 
 
 def data_url(png_bytes: bytes) -> str:
-  return "data:image/png;base64," + base64.b64encode(png_bytes).decode()
+  kind = "jpeg" if png_bytes[:2] == b"\xff\xd8" else "png"
+  return f"data:image/{kind};base64," + base64.b64encode(png_bytes).decode()
