@@ -122,25 +122,54 @@ extents and units; run the prescribed validator), not the numbers you intended t
 passed when its command errored or printed a failure: fix it or say plainly that it fails.
 - Before finishing, skim every input file you have not opened: decisive facts (a calendar, an exhibit, a later \
 letter, a checklist) are often in files whose names look irrelevant.
-- When evidence a governing document requires does not exist in the project, say so explicitly instead of \
-substituting something else; say who must decide what, and by which real date.
-- Before you apply any reference to an item, prove that it applies. (a) Provenance: is the lab curve, calibration, \
-design value, model run or approval for the same material source, location, phase, revision, load case and test \
-method as the item? One established on a different source or under a different standard cannot be used: say the \
-determination cannot be made until the right one exists, and do not compute a pass/fail with the wrong one. \
-(b) Scope: what exactly was approved, accepted or closed, and for which scope; never extend it. (c) Conditions: an \
-approval "subject to" something is not usable until the record shows the condition met; otherwise report it as \
-outstanding. (d) Process: who must test, inspect, witness or sign, how often, continuous or periodic, with what \
-qualification; check the record's dates, attendance and signatures against that. (e) Status: do not accept or \
-close an item while a prerequisite is open; say it remains open, what is required, by whom and by when. \
-(f) Commit to the one disposition the governing document prescribes; do not offer alternative paths it does not allow.
-- The client asks each question for a reason, and names each folder or document because it holds a fact the answer \
-needs. For every source the task names, find that fact and state it in the deliverable with its value and record. \
-For every finding, follow it to its consequence (physical, contractual, regulatory; rights, approvals, ownership, \
-what happens downstream or in the other operating condition) and check whether the record supports that \
-consequence. State plainly what the record does NOT contain (no easement, no approval, no calculation, no run \
-record) and which stated value stops holding under the condition asked about. These cross-document conclusions \
-carry most of the credit; restating what one sheet says carries little.
+- Judgement rules for memos, reviews, records and verdicts (most of the credit sits here, and most of it is lost \
+by doing the tempting thing):
+  1. Commit. List every question the requester asks and answer each with one call in the first lines of its \
+section: yes / no / cannot / withheld / rejected / remains open. No conditional approvals ("yes, provided that"), no \
+figure followed by a disclaimer, no alternative paths the governing document does not allow. If a precondition is \
+not shown met in the record, the answer is "not on the record as it stands", then what would make it a yes.
+  2. Prove that each source applies before you use it. A test, curve, calibration, calculation, model run, \
+approval or closure counts only for the same material/source, location and geometry, revision and date, \
+configuration and method as the item in hand. If it is for something similar but not the same, say in one sentence \
+that it does not apply and why, and do not use its numbers, not even provisionally: the item is then undetermined \
+and held. Never carry an earlier analysis forward to a state where its premises no longer hold; everything derived \
+from it falls too.
+  3. Read the scope line and the conditions of every approval, acceptance and closed item: what it covers, what it \
+does not, and whether the record shows its conditions discharged. A conditional approval with an open condition is \
+not an approval.
+  4. State absences. For each thing the governing requirement needs (a determination, a record, a signature, a \
+study, a right or easement, a run record), search the whole tree, then write either where it is or "the record \
+holds no ...; therefore ... is undetermined / unverified / remains open".
+  5. Follow each finding to its consequences: what else was derived from the invalid premise, which other work, \
+document, date or already-issued result is affected, whether the error is conservative or non-conservative, what \
+happens downstream or in the other operating condition. One sentence per consequence. Stopping at the observation \
+earns nothing.
+  6. Show both values when documents disagree ("X cites revision dated A; the revision block shows B"). \
+"There is a discrepancy" earns nothing.
+  7. Restraint. Add no margin, contingency, escalation, wider rework scope or reversal of an earlier outcome unless \
+a cited rule requires it; where the procedure lets the author decide, decide, and say no escalation is needed. Give \
+a verdict on every condition, including the ones that are met. Do not accept a revised value pushed by an \
+interested party or a number with no source in the record.
+  8. For every open point: the action, the responsible party (roles as the contract or procedure defines them) and \
+the activity or date it blocks; include required inspections, witnesses, independent reviews and signatures and \
+whether the record shows them done.
+  9. Decisive facts often sit in secondary places: comments on a checklist or page, a transmittal or routing line, \
+a revision block, a table note, file metadata, or the absence of a file from a folder. The deciding record is \
+often not the one the task names.
+  10. Write for a literal reader. One plain declarative sentence per decisive point, in the body text (not only in \
+a header, footnote, comment, table cell or image), with document id, clause, value and unit. After changing a \
+conclusion, search the whole document for the old figure or wording. Deliver exactly one document per requested \
+deliverable, with the exact name, type and folder asked for; leave no drafts, scratch files or stray comments in \
+the project tree.
+  11. If the task asks for record-keeping actions (a ticket, a log entry, filing a copy), do them last, from the \
+final document, and keep them identical to it.
+- Design packages: the cost objective is credited only if every hard requirement passes for that item, and a \
+requirement counts only when it is both satisfied and listed in the requirements register the task asks for: one \
+row per requirement, one clause per row, the value that clause states, citing only current governing documents \
+(never superseded, cancelled or invented ones). Put a complete, parseable submission on disk early (write to a \
+temporary name, then rename), then lower the cost while re-running every hard check.
+- Your final answer is graded with the files: make it a short, faithful summary of the calls in the deliverable \
+(dispositions, key absences, key numbers) in the same wording, with no new hedges.
 - Do not finish before every deliverable is complete and you have made a verification pass of its numbers, dates \
 and verdicts against the input documents. When those checks pass, finish: do not rework content that is correct.
 
@@ -200,17 +229,21 @@ date or conclusion that the inputs contradict.
 or hedged where a decision is required.
 5. For designs: test every hard constraint on the finished file with your own script; a constraint failure matters \
 more than any objective.
-6. Test applicability before accuracy: for every reference value, curve, approval, closure or acceptance the \
-deliverable relies on, check in the record that it covers the same material source, location, phase, revision \
-and test method; that any condition attached to it was met; that required inspections, witnesses, signatures and \
-frequencies happened; and that nothing is accepted or closed while a prerequisite is open. A correct calculation \
-on an inapplicable reference is the most expensive defect; report it first, with the passage that shows the mismatch.
-7. Look for the conclusion the colleague missed. For each folder or document the client names, open it and ask \
-what fact in it the answer needs; report it if the deliverable does not state that fact with its value. Follow \
-each finding to its consequence across documents (rights, approvals, ownership, downstream effects, the other \
-operating condition, a value that stops holding) and report any consequence, or any absence in the record (no \
-easement, no approval, no calculation), that the deliverable fails to state plainly. These are worth more than \
-arithmetic slips.
+6. Test applicability before accuracy: take each number and each source the deliverable relies on and try to \
+break it. Does the test, curve, calculation, approval or closure cover the same material/source, location, \
+revision, date, configuration and method as the item? Is its condition discharged in the record? Is an earlier \
+analysis carried forward to a state where its premises fail? A correct calculation on an inapplicable source is \
+the most expensive defect: report it first, with the passage that shows the mismatch, and say the item must be \
+stated as undetermined and held, without the inapplicable numbers.
+7. Commitment: list the questions the client asked; report any that lacks a single committed call, and any \
+conditional or hedged disposition ("provided that", "subject to", a figure the text elsewhere calls unconfirmed).
+8. Over-reach: report added margins or contingencies, unrequired escalations, widened scope, or reversal of an \
+earlier outcome that no cited rule requires; and any condition left without a verdict.
+9. Ask "so what?" of every finding: is the consequence for other work, other documents, dates and already-issued \
+results stated, with the responsible party and the gate it blocks?
+10. Absences: what does the governing procedure require that nobody showed (a determination, record, signature, \
+inspection, right)? Verify by searching; read comments, revision blocks, routing lines and notes of the key \
+records. Report each absence the deliverable does not state as an explicit sentence.
 
 Then answer without calling a tool. List only concrete defects that would cost credit with a strict grader, most \
 important first; for each give the file and location, the evidence (a quoted passage, or the command you ran and \
@@ -978,12 +1011,28 @@ class EngineerAgent(Agent):
           " counts, types) and change a file only where a line contradicts them:\n"
           + localtools.clip(self.measured, 12000))
     parts.append(
-        "Source and consequence pass. (a) List each folder, document or record the task text names; for each,"
-        " the decisive fact you took from it (value and unit) and where your deliverable states it. If a named"
-        " source contributed nothing, open it again: it was named for a reason. (b) For each question the task"
-        " asks, write the consequence one step beyond your answer (who has the right or approval, what receives"
-        " the flow/load/cost, which stated value stops holding in the other condition, what the record lacks) and"
-        " confirm the deliverable says it plainly. Add what is missing to the deliverable itself.")
+        "Final-pass questions. Answer each briefly, then fix the deliverable where an answer exposes a gap.\n"
+        "For a memo, review, record or verdict:\n"
+        " 1. For each question the requester asked: where is my one-sentence answer, and is it free of 'provided"
+        " that / subject to / pending confirmation' when the record does not show the precondition met?\n"
+        " 2. For each value, test, approval or calculation I used: is it for this exact item (source, location,"
+        " revision, date, configuration)? Where it is not, did I say so and stop using its numbers?\n"
+        " 3. What does the governing requirement need that the record does not contain, and is each absence an"
+        " explicit sentence with its consequence?\n"
+        " 4. For each finding: what else depends on it, who must do what before which activity, and did I avoid"
+        " adding margin, scope or escalation that no cited rule requires?\n"
+        " 5. Exactly one valid file per deliverable, exact name and folder, addressee/date/headings/sign-off,"
+        " every decisive statement in body text, consistent throughout; no scratch files left in the project tree?\n"
+        "For a design, model or package:\n"
+        " 1. Does the deliverable exist at the exact path and pass the strictest validation the task names, run"
+        " with the real library on the file itself?\n"
+        " 2. Is every hard requirement listed, with a computed pass for every item (including my own supports,"
+        " joints and background elements)?\n"
+        " 3. Are units and scale right, measured on the output?\n"
+        " 4. Is every requirement I designed to registered in its own row (current governing document, clause,"
+        " the value the clause states)?\n"
+        " 5. With all gates passing, is there a cheaper design that still passes, and were all checks re-run"
+        " after the last change?")
     return ("Pre-issue check before the independent review.\n\n" + "\n\n".join(parts)
             + "\n\nWhen done, leave correct work as it is." + AGAIN)
 
