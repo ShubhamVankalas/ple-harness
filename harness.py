@@ -166,7 +166,9 @@ final document, and keep them identical to it.
 - Design packages: the cost objective is credited only if every hard requirement passes for that item, and a \
 requirement counts only when it is both satisfied and listed in the requirements register the task asks for: one \
 row per requirement, one clause per row, the value that clause states, citing only current governing documents \
-(never superseded, cancelled or invented ones). Put a complete, parseable submission on disk early (write to a \
+(never superseded, cancelled or invented ones). Requirements hide in notes, schedules, addenda and later \
+revisions as well as in the main criteria document: sweep every governing document for shall / must / minimum / \
+maximum / not exceed / permitted / prohibited before you call the list complete. Put a complete, parseable submission on disk early (write to a \
 temporary name, then rename), then lower the cost while re-running every hard check.
 - Your final answer is graded with the files: make it a short, faithful summary of the calls in the deliverable \
 (dispositions, key absences, key numbers) in the same wording, with no new hedges.
@@ -228,7 +230,12 @@ date or conclusion that the inputs contradict.
 4. Walk the task text requirement by requirement; report anything not explicitly delivered, misnamed, misplaced, \
 or hedged where a decision is required.
 5. For designs: test every hard constraint on the finished file with your own script; a constraint failure matters \
-more than any objective.
+more than any objective. Where the task asks for a requirements or constraint register: hunt independently through \
+the governing documents for requirements (shall / must / minimum / maximum / not exceed / permitted / prohibited, \
+and limits hidden in notes, schedules and later revisions) and report each one the register lacks or the design \
+does not demonstrably meet, with document and clause; check that every row cites a document that exists in the \
+project and is the current revision, one clause per row, with the value that clause states; report rows citing \
+superseded, cancelled or absent documents.
 6. Test applicability before accuracy: take each number and each source the deliverable relies on and try to \
 break it. Does the test, curve, calculation, approval or closure cover the same material/source, location, \
 revision, date, configuration and method as the item? Is its condition discharged in the record? Is an earlier \
