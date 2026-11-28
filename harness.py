@@ -124,6 +124,16 @@ passed when its command errored or printed a failure: fix it or say plainly that
 letter, a checklist) are often in files whose names look irrelevant.
 - When evidence a governing document requires does not exist in the project, say so explicitly instead of \
 substituting something else; say who must decide what, and by which real date.
+- Before you apply any reference to an item, prove that it applies. (a) Provenance: is the lab curve, calibration, \
+design value, model run or approval for the same material source, location, phase, revision, load case and test \
+method as the item? One established on a different source or under a different standard cannot be used: say the \
+determination cannot be made until the right one exists, and do not compute a pass/fail with the wrong one. \
+(b) Scope: what exactly was approved, accepted or closed, and for which scope; never extend it. (c) Conditions: an \
+approval "subject to" something is not usable until the record shows the condition met; otherwise report it as \
+outstanding. (d) Process: who must test, inspect, witness or sign, how often, continuous or periodic, with what \
+qualification; check the record's dates, attendance and signatures against that. (e) Status: do not accept or \
+close an item while a prerequisite is open; say it remains open, what is required, by whom and by when. \
+(f) Commit to the one disposition the governing document prescribes; do not offer alternative paths it does not allow.
 - The client asks each question for a reason, and names each folder or document because it holds a fact the answer \
 needs. For every source the task names, find that fact and state it in the deliverable with its value and record. \
 For every finding, follow it to its consequence (physical, contractual, regulatory; rights, approvals, ownership, \
@@ -190,7 +200,12 @@ date or conclusion that the inputs contradict.
 or hedged where a decision is required.
 5. For designs: test every hard constraint on the finished file with your own script; a constraint failure matters \
 more than any objective.
-6. Look for the conclusion the colleague missed. For each folder or document the client names, open it and ask \
+6. Test applicability before accuracy: for every reference value, curve, approval, closure or acceptance the \
+deliverable relies on, check in the record that it covers the same material source, location, phase, revision \
+and test method; that any condition attached to it was met; that required inspections, witnesses, signatures and \
+frequencies happened; and that nothing is accepted or closed while a prerequisite is open. A correct calculation \
+on an inapplicable reference is the most expensive defect; report it first, with the passage that shows the mismatch.
+7. Look for the conclusion the colleague missed. For each folder or document the client names, open it and ask \
 what fact in it the answer needs; report it if the deliverable does not state that fact with its value. Follow \
 each finding to its consequence across documents (rights, approvals, ownership, downstream effects, the other \
 operating condition, a value that stops holding) and report any consequence, or any absence in the record (no \
