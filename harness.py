@@ -77,6 +77,10 @@ async def heavy(fn: Any, *args: Any, timeout: float = HEAVY_SEC) -> Any:
   except (asyncio.TimeoutError, asyncio.CancelledError):
     gone.set()
     raise
+# ablation switches (all on by default)
+FORMAT_GATE = os.environ.get("FORMAT_GATE", "1") != "0"
+PRE_ISSUE = os.environ.get("PRE_ISSUE", "1") != "0"
+JUDGEMENT_RULES = os.environ.get("JUDGEMENT_RULES", "1") != "0"
 AUDIT_STEPS = int(os.environ.get("AUDIT_STEPS", "45"))  # tool calls one audit may make
 AUDIT_SHARE = float(os.environ.get("AUDIT_SHARE", "0.3"))  # of the time left, per audit
 PREVIEW_FILES = int(os.environ.get("PREVIEW_FILES", "90"))
@@ -181,6 +185,15 @@ Harness tools (they run outside the container, on a copy of the file):
 - view: look at a PDF page, an image or a DXF drawing; crop=[x0,y0,x1,y1] (fractions of the page, origin top-left) \
 zooms in.
 In inspect output, lines in [[double brackets]], [style] prefixes and " | " separators are annotations, not file text."""
+
+def system_rules() -> str:
+  """EXTRA_SYSTEM, without the judgement-rules block when that ablation switch is off."""
+  if JUDGEMENT_RULES:
+    return EXTRA_SYSTEM
+  a = EXTRA_SYSTEM.find("- Judgement rules for memos")
+  b = EXTRA_SYSTEM.find("- Design packages:")
+  return EXTRA_SYSTEM if a < 0 or b < 0 else EXTRA_SYSTEM[:a] + EXTRA_SYSTEM[b:]
+
 
 HARNESS_TOOLS = [
     tool(
@@ -1169,7 +1182,7 @@ class EngineerAgent(Agent):
     self.messages = [
         {"role": "system", "content": serve.SYSTEM.format(
             workdir=self.session.workdir, mcp=mcp,
-            minutes=int(left / 60) if left else "unlimited") + EXTRA_SYSTEM},
+            minutes=int(left / 60) if left else "unlimited") + system_rules()},
         {"role": "user", "content": self.session.instruction
          + "\n\n----- harness survey of the workspace -----\n" + survey},
     ]
@@ -1260,7 +1273,7 @@ class EngineerAgent(Agent):
                 " harness resolved a relative path against the wrong folder, or it is an input or an archive"
                 " member), do NOT create it; you will not be asked again." + AGAIN)
     left = self.session.time_left()
-    if self.format_checks < 3 and (left is None or left > self.finish_margin + 180):
+    if FORMAT_GATE and self.format_checks < 3 and (left is None or left > self.finish_margin + 180):
       try:
         bad = await self.invalid_outputs()
       except taskbridge.Cancelled:
@@ -1279,7 +1292,7 @@ class EngineerAgent(Agent):
                 " task requires, leave that file unchanged and say so." + AGAIN + "\n\n" + "\n".join(bad))
     if self.minutes_left() < REVIEW_MIN_LEFT_MIN:
       return None
-    if self.coverage_checks < 1:
+    if PRE_ISSUE and self.coverage_checks < 1:
       self.coverage_checks += 1
       note = await self.pre_issue_note()
       if note:
