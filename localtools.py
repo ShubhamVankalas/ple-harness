@@ -581,6 +581,16 @@ def validate(path: str, data: bytes) -> list[str]:
       badf = z.testzip()
       if badf:
         return [f"corrupt member {badf}"]
+      out: list[str] = []
+      infos = [i for i in z.infolist() if not i.is_dir()]
+      if not infos:
+        return ["the archive is empty"]
+      for i in infos[:60]:
+        if ext(i.filename) == ".zip" or i.file_size > 30_000_000:
+          continue
+        for issue in validate(i.filename, z.read(i))[:4]:
+          out.append(f"member {i.filename}: {issue}")
+      return out[:20]
   except Exception as exc:  # pylint: disable=broad-except
     return [f"cannot be opened as {e or 'this format'}: {type(exc).__name__}: {str(exc)[:240]}"]
   return []
